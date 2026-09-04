@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import modal
 import pytest
+from rich.text import Text
 
+from blender_modal import output
 from blender_modal.catalog import Catalog, CatalogError, build_scene
-from blender_modal.cli import _log, _parser, _upload_includes, _upload_root_and_blend
+from blender_modal.cli import _emit, _log, _parser, _upload_includes, _upload_root_and_blend
 from blender_modal.frames import parse_frames
+
+
+@pytest.fixture(autouse=True)
+def reset_output() -> Iterator[None]:
+    output.configure(verbose=False)
+    yield
+    output.configure(verbose=False)
 
 
 def test_scene_identity_is_stable_and_content_based(tmp_path: Path) -> None:
@@ -144,13 +155,49 @@ def test_cleanup_accepts_force_flag() -> None:
     assert _parser().parse_args(["cleanup", "--force"]).force
 
 
-def test_command_log_writes_to_standard_error(capsys: pytest.CaptureFixture[str]) -> None:
+def test_verbose_log_writes_to_standard_error(capsys: pytest.CaptureFixture[str]) -> None:
+    output.configure(verbose=True)
+
     _log("list", "Loading scenes")
 
     captured = capsys.readouterr()
 
     assert captured.out == ""
     assert captured.err == "list: Loading scenes\n"
+
+
+def test_quiet_log_is_silent(capsys: pytest.CaptureFixture[str]) -> None:
+    _log("list", "Loading scenes")
+
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_emit_json_prints_machine_readable_output(capsys: pytest.CaptureFixture[str]) -> None:
+    args = _parser().parse_args(["--json", "list", "scenes"])
+
+    _emit(args, {"results": "abc"}, "human text")
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"results": "abc"}
+    assert "human text" not in captured.out
+
+
+def test_emit_human_prints_plain_text(capsys: pytest.CaptureFixture[str]) -> None:
+    args = _parser().parse_args(["list", "scenes"])
+
+    _emit(args, {"results": "abc"}, Text("human text", style="green"))
+
+    captured = capsys.readouterr()
+
+    assert captured.out == "human text\n"
+
+
+def test_verbose_flag() -> None:
+    assert _parser().parse_args(["-v", "list", "scenes"]).verbose
+    assert not _parser().parse_args(["list", "scenes"]).verbose
 
 
 @pytest.mark.parametrize(

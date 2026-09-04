@@ -19,7 +19,8 @@ uv run blender-modal download RESULTS_ID --output ./renders
 
 Use `--detach` to submit a render and return immediately, then inspect it with
 `info JOB_ID` or stop it with `cancel JOB_ID`. `--json` provides structured
-output. `--volume` and `--environment` select a non-default Modal workspace.
+machine-readable output; `-v/--verbose` logs detailed progress to standard
+error. `--volume` and `--environment` select a non-default Modal workspace.
 
 `upload` preserves project-relative paths and accepts either a `.blend` file
 (uploading only that file by default), or a project root with an explicit
@@ -27,9 +28,10 @@ entrypoint `.blend` (uploading every regular file below the root). Use `--includ
 to add selected files or directories to a direct `.blend` upload. It hashes every regular file;
 the same scene ID is skipped, while unchanged file blobs are reused by SHA-256.
 The GPU worker validates external Blender assets when it opens the scene.
-All commands write status updates to standard error, so `--json` output remains
-machine-readable. Upload status includes hashing, blob transfer, and scene
-materialization progress.
+Output is human-readable with colors by default, with a minimal status line
+during long operations. Pass `-v` for detailed progress on standard error
+(hashing, blob transfer, scene materialization), or `--json` for
+machine-readable output on standard output; both can be combined.
 
 `cleanup` retains unreferenced upload blobs for 24 hours to avoid interfering with
 an active upload. Use `cleanup --force` to immediately remove unreferenced blobs

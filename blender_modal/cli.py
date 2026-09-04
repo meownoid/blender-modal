@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
-import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, replace
@@ -14,19 +12,26 @@ from pathlib import Path
 from typing import Any
 
 import modal
+from rich.console import Group
+from rich.text import Text
 
+from . import output
 from .catalog import Catalog, CatalogError, frame_path, result_manifest_path
 from .frames import parse_frames
-from .models import JobManifest, RenderSpec, utc_now
+from .models import JobManifest, RenderSpec, SceneManifest, utc_now
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
     args = parser.parse_args(argv)
+    output.configure(verbose=args.verbose)
     try:
         _commands()[args.command](args)
     except (CatalogError, ValueError, modal.exception.Error) as exc:
+        output.stop_status()
         parser.error(str(exc))
+    finally:
+        output.stop_status()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,6 +40,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--environment", help="Modal environment name")
     parser.add_argument(
         "--json", action="store_true", dest="as_json", help="machine-readable output"
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="log progress details to standard error",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -129,7 +140,11 @@ def _upload(args: argparse.Namespace) -> None:
     manifest, files = build_scene(root, blend, includes, args.name, progress=progress)
     progress(f"Prepared {len(files)} file(s) for scene {manifest.id}")
     uploaded = upload_scene(_catalog(args), manifest, files, progress=progress)
-    _emit(args, {"scene": manifest.to_dict(), "uploaded": uploaded})
+    _emit(
+        args,
+        {"scene": manifest.to_dict(), "uploaded": uploaded},
+        _upload_human(manifest, uploaded),
+    )
 
 
 def _upload_root_and_blend(args: argparse.Namespace) -> tuple[Path, Path]:
@@ -173,8 +188,11 @@ def _list(args: argparse.Namespace) -> None:
             }
             for scene in values
         ]
+        human: Any = _scenes_human(values)
+    else:
+        human = _results_human(values)
     _log("list", f"Found {len(values)} {args.list_command}")
-    _emit(args, values)
+    _emit(args, values, human)
 
 
 def _render(args: argparse.Namespace) -> None:
@@ -209,6 +227,10 @@ def _render(args: argparse.Namespace) -> None:
                 "cached_frames": list(requested),
                 "submitted_frames": [],
             },
+            Group(
+                f"[green]✓[/] All {len(requested)} requested frame(s) already rendered",
+                Text(f"Results: {result_id}", style="cyan"),
+            ),
         )
         return
     _log("render", f"{len(existing)} cached frame(s), {len(missing)} frame(s) to render")
@@ -267,6 +289,12 @@ def _render(args: argparse.Namespace) -> None:
                 "cached_frames": sorted(existing),
                 "submitted_frames": list(missing),
             },
+            Group(
+                Text(f"Job:     {job.id}", style="cyan"),
+                Text(f"Results: {result_id}", style="cyan"),
+                f"Frames:  {len(existing)} cached, {len(missing)} submitted",
+                Text(f"Track:   blender-modal info {job.id}", style="dim"),
+            ),
         )
         if not args.detach:
             failures: list[str] = []
@@ -307,17 +335,22 @@ def _download(args: argparse.Namespace) -> None:
         if target.exists() and not args.overwrite:
             raise CatalogError(f"Refusing to overwrite {target}; pass --overwrite")
         temporary = target.with_name(f".{target.name}.partial")
-        with temporary.open("wb") as output:
+        with temporary.open("wb") as sink:
             for chunk in catalog.volume.read_file(frame_path(args.results, frame, "frame.png")):
-                output.write(chunk)
+                sink.write(chunk)
         if _file_hash(temporary) != metadata.get("sha256"):
             temporary.unlink(missing_ok=True)
             raise CatalogError(f"Downloaded checksum does not match for frame {frame}")
         temporary.replace(target)
         downloaded.append(frame)
     _log("download", f"Finished: {len(downloaded)} downloaded, {len(skipped)} already present")
+    human = f"[green]✓[/] {len(downloaded)} frame(s) written to {args.output}"
+    if skipped:
+        human += f" [dim]({len(skipped)} already present)[/]"
     _emit(
-        args, {"results": args.results, "downloaded_frames": downloaded, "skipped_frames": skipped}
+        args,
+        {"results": args.results, "downloaded_frames": downloaded, "skipped_frames": skipped},
+        human,
     )
 
 
@@ -335,7 +368,11 @@ def _remove(args: argparse.Namespace) -> None:
         _log("remove", f"{'Previewing' if args.dry_run else 'Removing'} results {args.results}")
         removed = catalog.remove_results(args.results, frames, dry_run=args.dry_run)
     _log("remove", f"Selected {len(removed)} path(s)")
-    _emit(args, {"dry_run": args.dry_run, "removed": removed})
+    _emit(
+        args,
+        {"dry_run": args.dry_run, "removed": removed},
+        _removal_human(removed, args.dry_run),
+    )
 
 
 def _cleanup(args: argparse.Namespace) -> None:
@@ -355,6 +392,7 @@ def _cleanup(args: argparse.Namespace) -> None:
             "dry_run": args.dry_run,
             "removed": removed,
         },
+        _removal_human(removed, args.dry_run),
     )
 
 
@@ -371,16 +409,17 @@ def _info(args: argparse.Namespace) -> None:
         }
         if args.watch:
             _log("info", "Watching for job updates")
-            _watch(catalog, job.id, args, payload)
+            _watch(catalog, job.id, args, payload, _info_job_human(payload))
             return
-        _emit(args, payload)
+        _emit(args, payload, _info_job_human(payload))
         return
     _log("info", "Loading jobs and workspace billing")
     rates, summary, report_error = _billing()
+    jobs = catalog.list_jobs()
     _emit(
         args,
         {
-            "jobs": [job.to_dict() for job in catalog.list_jobs()],
+            "jobs": [job.to_dict() for job in jobs],
             "billing": {
                 "rates": rates,
                 "summary": summary,
@@ -388,6 +427,7 @@ def _info(args: argparse.Namespace) -> None:
                 "error": report_error,
             },
         },
+        _info_workspace_human(jobs, summary, report_error),
     )
 
 
@@ -407,7 +447,10 @@ def _cancel(args: argparse.Namespace) -> None:
         except Exception as exc:
             errors.append(str(exc))
     _log("cancel", f"Cancellation complete with {len(errors)} error(s)")
-    _emit(args, {"job": job.id, "cancelled": True, "errors": errors})
+    lines = [f"[green]✓[/] Cancelled job {job.id}"]
+    if errors:
+        lines.append(f"[yellow]{len(errors)} shard(s) reported cancellation errors[/]")
+    _emit(args, {"job": job.id, "cancelled": True, "errors": errors}, Group(*lines))
 
 
 def _refresh_job(catalog: Catalog, job_id: str) -> JobManifest:
@@ -457,16 +500,21 @@ def _ensure_no_active_scene(catalog: Catalog, scene_id: str) -> None:
 
 
 def _watch(
-    catalog: Catalog, job_id: str, args: argparse.Namespace, payload: dict[str, Any]
+    catalog: Catalog,
+    job_id: str,
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    human: Any,
 ) -> None:
     import time
 
     while payload["job"]["status"] == "running":
-        _emit(args, payload)
+        _emit(args, payload, human)
         time.sleep(2)
         job = _refresh_job(catalog, job_id)
         payload = {"job": job.to_dict(), "workers": _worker_statuses(catalog, job)}
-    _emit(args, payload)
+        human = _info_job_human(payload)
+    _emit(args, payload, human)
 
 
 def _billing() -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
@@ -569,22 +617,183 @@ def _command_progress(command: str) -> Callable[[str], None]:
 
 
 def _log(command: str, message: str) -> None:
-    print(f"{command}: {message}", file=sys.stderr, flush=True)
+    output.log(command, message)
 
 
 def _should_log_step(index: int, total: int) -> bool:
     return total <= 10 or index == 1 or index == total or index % 25 == 0
 
 
-def _emit(args: argparse.Namespace, value: Any) -> None:
+def _emit(args: argparse.Namespace, value: Any, human: Any = None) -> None:
     if args.as_json:
-        print(json.dumps(value, default=str, indent=2, sort_keys=True))
+        output.emit_json(value)
         return
-    if isinstance(value, list):
-        for item in value:
-            print(json.dumps(item, default=str, sort_keys=True))
+    output.emit_human(human if human is not None else str(value))
+
+
+def _upload_human(manifest: SceneManifest, uploaded: bool) -> Any:
+    if not uploaded:
+        return Text(
+            f"Scene {manifest.id} already exists; upload skipped",
+            style="yellow",
+        )
+    size = output.size_bytes(sum(file.size for file in manifest.files))
+    return Group(
+        Text(f"✓ Uploaded scene {manifest.id}", style="green"),
+        Text(
+            f"{manifest.name or 'unnamed'} · {len(manifest.files)} file(s) · {size}",
+            style="dim",
+        ),
+    )
+
+
+def _scenes_human(values: list[dict[str, Any]]) -> Any:
+    if not values:
+        return Text("No scenes found", style="dim")
+    entries: list[Any] = []
+    for item in values:
+        details = (
+            f"{item.get('name') or 'unnamed'} · {item['entrypoint']} · "
+            f"{item['files']} file(s) · {output.size_bytes(int(item['size_bytes']))} · "
+            f"{_format_timestamp(str(item['created_at']))}"
+        )
+        entries.append(_entry(str(item["id"]), details))
+    return Group(*_spaced(entries))
+
+
+def _results_human(values: list[dict[str, Any]]) -> Any:
+    if not values:
+        return Text("No results found", style="dim")
+    entries: list[Any] = []
+    for item in values:
+        spec = item.get("spec") or {}
+        details = (
+            f"{len(item.get('frames') or [])} frame(s) · "
+            f"{len(item.get('jobs') or [])} job(s) · "
+            f"{_format_timestamp(str(item.get('created_at', '')))}"
+        )
+        entries.append(_entry(str(item["id"]), details, f"scene {spec.get('scene_id', '-')}"))
+    return Group(*_spaced(entries))
+
+
+def _entry(identifier: str, *details: str) -> Any:
+    return Group(
+        Text(identifier, style="cyan"),
+        *(Text(f"  {line}", style="dim") for line in details),
+    )
+
+
+def _spaced(entries: list[Any]) -> list[Any]:
+    spaced: list[Any] = []
+    for index, item in enumerate(entries):
+        if index:
+            spaced.append(Text(""))
+        spaced.append(item)
+    return spaced
+
+
+def _removal_human(removed: list[str], dry_run: bool) -> Any:
+    count = len(removed)
+    if dry_run:
+        header = Text(f"Would remove {count} path(s) (dry run)", style="yellow")
     else:
-        print(json.dumps(value, default=str, indent=2, sort_keys=True))
+        header = Text(f"Removed {count} path(s)", style="green" if count else "dim")
+    shown = removed[:50]
+    lines: list[Any] = [header, *(Text(path, style="dim") for path in shown)]
+    if len(removed) > len(shown):
+        lines.append(Text(f"… and {len(removed) - len(shown)} more", style="dim"))
+    return Group(*lines)
+
+
+def _info_job_human(payload: dict[str, Any]) -> Any:
+    job = payload["job"]
+    status = str(job["status"])
+    lines: list[Any] = [
+        Text.assemble(
+            ("Job: ", ""),
+            (str(job["id"]), "cyan"),
+            ("  ", ""),
+            (status, output.status_style(status)),
+        ),
+        Text(f"Results: {job['result_id']}", style="cyan"),
+        f"Frames: {len(job['requested_frames'])} requested · "
+        f"GPU: {job['gpu']} × {job['gpus_per_instance']} · Instances: {job['instances']}",
+        Text(f"Created: {_format_timestamp(str(job['created_at']))}", style="dim"),
+    ]
+    workers = payload.get("workers") or []
+    if workers:
+        lines.append(Text("Workers:", style="bold"))
+        for index, worker in enumerate(workers):
+            worker_status = str(worker.get("status", "unknown"))
+            completed = len(worker.get("completed_frames") or [])
+            total = len(worker.get("frames") or [])
+            elapsed = worker.get("elapsed_seconds")
+            detail = f"{completed}/{total} frames"
+            if elapsed is not None:
+                detail += f" · {float(elapsed):.0f}s"
+            if worker.get("error"):
+                detail += f" · {worker['error']}"
+            lines.append(
+                Text.assemble(
+                    (f"  #{index} ", ""),
+                    (worker_status, output.status_style(worker_status)),
+                    (f" {detail}", ""),
+                )
+            )
+    billing = payload.get("billing") or {}
+    estimate = billing.get("estimate") or {}
+    if billing.get("reported_cost") not in (None, "pending"):
+        lines.append(f"Cost: {billing['reported_cost']}")
+    elif estimate.get("gpu_seconds"):
+        gpu_seconds = float(estimate["gpu_seconds"])
+        lines.append(
+            Text(f"Estimated GPU time: {gpu_seconds:.0f}s (cost pending)", style="dim")
+        )
+    return Group(*lines)
+
+
+def _info_workspace_human(
+    jobs: list[JobManifest], summary: dict[str, Any] | None, report_error: str | None
+) -> Any:
+    lines: list[Any] = []
+    if jobs:
+        entries = [
+            Group(
+                Text.assemble(
+                    (job.id, "cyan"),
+                    ("  ", ""),
+                    (job.status, output.status_style(job.status)),
+                ),
+                Text(
+                    f"  {len(job.requested_frames)} frame(s) · {job.gpu} × "
+                    f"{job.gpus_per_instance} · {_format_timestamp(job.created_at)}",
+                    style="dim",
+                ),
+            )
+            for job in jobs
+        ]
+        lines.append(Group(*_spaced(entries)))
+    else:
+        lines.append(Text("No jobs found", style="dim"))
+    if summary:
+        start = str(summary.get("start", ""))[:10]
+        end = str(summary.get("end", ""))[:10]
+        label = f"{start} → {end}" if start and end else "current period"
+        lines.append(Text(f"Billing ({label}):", style="bold"))
+        for key, value in sorted(summary.items()):
+            if key in ("adjustments", "metered_cost_breakdown"):
+                continue
+            lines.append(Text(f"  {key}: {value}", style="dim"))
+    if report_error:
+        lines.append(Text(report_error, style="dim"))
+    return Group(*lines)
+
+
+def _format_timestamp(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return value
 
 
 if __name__ == "__main__":
