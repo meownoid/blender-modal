@@ -1,0 +1,11 @@
+.git
+.DS_Store
+**/.DS_Store
+**/__pycache__
+**/*.pyc
+.venv
+.mypy_cache
+.pytest_cache
+frontend/node_modules
+frontend/dist
+tests

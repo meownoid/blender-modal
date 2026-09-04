@@ -1,0 +1,318 @@
+# Blender FLIP Fluids Add-on
+# Copyright (C) 2026 Ryan L. Guy & Dennis Fassbaender
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import bpy
+from bpy.props import (
+        BoolProperty,
+        FloatProperty,
+        FloatVectorProperty,
+        IntProperty,
+        StringProperty,
+        PointerProperty,
+        EnumProperty,
+        )
+
+from . import preset_properties
+from .. import types
+from ..utils import version_compatibility_utils as vcu
+
+
+class FlipFluidInflowProperties(bpy.types.PropertyGroup):
+    
+    is_enabled: BoolProperty(
+            name="Enabled",
+            description="Inflow emits fluid into the domain. Tip: keyframe this option on/off to start and stop inflow emission",
+            default=True,
+            )
+    substep_emissions: IntProperty(
+            name="Substep Emissions",
+            description="Number of times fluid is emitted from the inflow"
+                " per simulation substep. Increase to reduce stuttering"
+                " fluid artifacts with fast moving keyframed/animated inflow"
+                " objects. If set to 0, the inflow will only emit on the first"
+                " substep of a frame",
+            min=0, soft_max=8,
+            default=1,
+            )
+    inflow_velocity: FloatVectorProperty(
+            name="Inflow Velocity",
+            description="Initial velocity of fluid (m/s)",
+            default=(0.0, 0.0, 0.0),
+            subtype='VELOCITY',
+            precision=3,
+            size=3,
+            )
+    append_object_velocity: BoolProperty(
+            name="Add Object Velocity to Infow",
+            description="Add the velocity of the object to the inflow fluid"
+                " velocity",
+            default=False,
+            )
+    append_object_velocity_influence: FloatProperty(
+            name="Influence",
+            description="Amount of velocity that is added to the inflow fluid."
+                " A value of 1.0 is normal, less than 1.0 will dampen the"
+                " velocity, greater than 1.0 will exaggerate the velocity,"
+                " negative values will reverse velocity direction",
+            subtype='FACTOR',
+            soft_min=0.0, soft_max=1.0,
+            default=1.0,
+            precision=2,
+            )
+    priority: IntProperty(
+            name="Priority",
+            description="Priority that this fluid object is added to the simulation"
+                " during a frame. If multiple fluid/inflow objects are adding fluid"
+                " to the simulation during a frame, the object with the higher priority"
+                " value will be added first. Use to control which fluid attributes are"
+                " prioritized and set first such as with intersecting objects or nested"
+                " objects",
+            min=-1000000, max=1000000,
+            default=0,
+            )
+    inflow_velocity_mode: EnumProperty(
+            name="Velocity Mode",
+            description="Set how the inflow fluid velocity is calculated",
+            items=types.inflow_velocity_modes,
+            default='INFLOW_VELOCITY_MANUAL',
+            options={'HIDDEN'},
+            )
+    inflow_speed: FloatProperty(
+            name="Speed",
+            description="Initial speed of fluid towards target (m/s)",
+            default=0.0,
+            precision=3,
+            )
+    inflow_axis_mode: EnumProperty(
+            name="Local Axis",
+            description="Set local axis direction of fluid",
+            items=types.local_axis_directions,
+            default='LOCAL_AXIS_POS_X',
+            )
+    target_object: PointerProperty(
+            name="Target Object", 
+            type=bpy.types.Object
+            )
+    export_animated_target: BoolProperty(
+            name="Export Animated Target",
+            description="Export this object as an animated mesh. Exporting animated meshes are"
+                " slower, only use when necessary. This option is required for any animation that"
+                " is more complex than just keyframed loc/rot/scale or F-Curves, such as parented"
+                " relations, armatures, animated modifiers, deformable meshes, etc. This option is"
+                " not needed for static objects",
+            default=False,
+            options={'HIDDEN'},
+            )
+    constrain_fluid_velocity: BoolProperty(
+            name="Constrain Fluid Velocity",
+            description="Force fluid inside of the inflow to match the inflow" +
+                " emission velocity. If enabled, the inflow will continue to" +
+                " push around fluid when submerged. Setting low inflow velocity" + 
+                " values will have the effect of slowing down fluid emission",
+            default=False,
+            options={'HIDDEN'},
+            )
+    source_id: IntProperty(
+            name="Source ID Attribute",
+            description="Assign this identifier value to the fluid generated by this inflow. After"
+                " baking, the source ID attribute values can be accessed in a Cycles Attribute Node"
+                " with the name 'flip_source_id' from the Fac output. This can be used to create"
+                " basic multiple material liquid effects. Enable this feature in the Domain FLIP"
+                " Fluid Surface panel",
+            min=0, soft_max=16,
+            default=0,
+            options={'HIDDEN'},
+            )
+    viscosity: FloatProperty(
+            name="Viscosity Attribute",
+            description="Assign this viscosity value to the fluid generated by this object. After"
+                " baking, the viscosity attribute values can be accessed in a Cycles Attribute Node"
+                " with the name 'flip_viscosity' from the Fac output. This feature can be used to create"
+                " variable viscosity liquid effects. Enable this viscosity feature in the Domain FLIP"
+                " Fluid World panel",
+            min=0.0,
+            default=0.0,
+            )
+    density: FloatProperty(
+            name="Density Attribute",
+            description="Assign this density value in g/cm^3 to the fluid generated by this object. After"
+                " baking, the density attribute values can be accessed in a Cycles Attribute Node"
+                " with the name 'flip_density' from the Fac output. This feature"
+                " can be used to create variable density liquids that float or sink. Enable this density feature"
+                " in the Domain World panel",
+            soft_min = 0.05, soft_max=20.0,
+            min=0.0001,
+            default=1.0,
+            )
+    lifetime: FloatProperty(
+            name="Lifetime Attribute",
+            description="Assign this starting lifetime value to the fluid generated by this object."
+                " This value is the amount of time remaining (in seconds) before the fluid is removed from the"
+                " simulation. After baking, the lifetime attribute values can be accessed in a Cycles Attribute Node"
+                " with the name 'flip_lifetime' from the Fac output. Enable this feature in the Domain FLIP"
+                " Fluid Surface panel",
+            min=0.0,
+            default=1000.0,
+            )
+    lifetime_variance: FloatProperty(
+            name="Lifetime Variance",
+            description="Add or subtract a random value in seconds to the starting lifetime within the range of this variance value",
+            min=0.0,
+            default=0.0,
+            )
+    color: FloatVectorProperty(
+            name="Color Attribute",
+            description="Assign this color to the fluid generated by this object. After"
+                " baking, the color attribute values can be accessed in a Cycles Attribute Node"
+                " with the name 'flip_color' from the Color output. This can be used to create"
+                " basic varying color liquid effects. Enable this feature in the Domain FLIP"
+                " Fluid Surface panel",
+            default=(1.0, 1.0, 1.0),
+            min=0.0, max=1.0,
+            size=3,
+            precision=3,
+            subtype='COLOR',
+            )
+    export_animated_mesh: BoolProperty(
+            name="Export Animated Mesh",
+            description="Export this mesh as an animated one (slower, only use"
+                " if really necessary [e.g. armatures or parented objects],"
+                " animated pos/rot/scale F-curves do not require it",
+            default=False,
+            options={'HIDDEN'},
+            )
+    skip_reexport: BoolProperty(
+            name="Skip Re-export",
+            description="Skip re-exporting this mesh when starting or resuming"
+                " a bake. If this mesh has not been exported or is missing files,"
+                " the addon will automatically export the required files",
+            default=False,
+            options={'HIDDEN'},
+            )
+    force_reexport_on_next_bake: BoolProperty(
+            name="Force Re-Export On Next Bake",
+            description="Override the 'Skip Re-Export' option and force this mesh to be"
+                " re-exported and updated on the next time a simulation start/resumes"
+                " baking. Afting starting/resuming the baking process, this option"
+                " will automatically be disabled once the object has been fully exported."
+                " This option is only applicable if 'Skip Re-Export' is enabled",
+            default=False,
+            options={'HIDDEN'},
+            )
+    property_registry: PointerProperty(
+            name="Inflow Property Registry",
+            description="",
+            type=preset_properties.PresetRegistry,
+            )
+
+
+    disabled_in_viewport_tooltip: BoolProperty(
+            name="Object Disabled in Viewport", 
+            description="This inflow object is currently disabled in the viewport within the"
+                " outliner (Monitor Icon) and will not be included in the simulation. If you"
+                " want the object hidden in the viewport, but still have the object included in the"
+                " simulation, use the outliner Hide in Viewport option instead (Eye Icon)", 
+            default=True,
+            )
+    disabled_in_viewport_modifiers_tooltip: BoolProperty(
+            name="Object Modifiers Disabled in Viewport", 
+            description="This inflow object modifier stack contains modifiers that are currently disabled"
+                " in the viewport (Monitor Icon) and will not be included within the simulation.", 
+            default=True,
+            )
+
+
+
+    def initialize(self):
+        self._initialize_property_registry()
+
+
+    def refresh_property_registry(self):
+        self._initialize_property_registry()
+
+
+    def _initialize_property_registry(self):
+        try:
+            self.property_registry.clear()
+            add = self.property_registry.add_property
+            add("inflow.is_enabled", "")
+            add("inflow.substep_emissions", "")
+            add("inflow.inflow_velocity_mode", "")
+            add("inflow.inflow_velocity", "")
+            add("inflow.append_object_velocity", "")
+            add("inflow.append_object_velocity_influence", "")
+            add("inflow.priority", "")
+            add("inflow.constrain_fluid_velocity", "")
+            add("inflow.inflow_speed", "")
+            add("inflow.inflow_axis_mode", "")
+            add("inflow.source_id", "")
+            add("inflow.viscosity", "")
+            add("inflow.density", "")
+            add("inflow.lifetime", "")
+            add("inflow.lifetime_variance", "")
+            add("inflow.color", "")
+            add("inflow.target_object", "")
+            add("inflow.export_animated_target", "")
+            add("inflow.export_animated_mesh", "")
+            add("inflow.skip_reexport", "")
+            add("inflow.force_reexport_on_next_bake", "")
+            self._validate_property_registry()
+        except:
+            # Object is immutable if it is a linked library or library_override
+            # In this case, pass on modifying the object
+            pass
+
+
+    def _validate_property_registry(self):
+        for p in self.property_registry.properties:
+            path = p.path
+            base, identifier = path.split('.', 1)
+            if not hasattr(self, identifier):
+                print("Property Registry Error: Unknown Identifier <" + identifier + ", " + path + ">")
+
+
+    def get_target_object(self):
+        obj = None
+        try:
+            all_objects = vcu.get_all_scene_objects()
+            obj = self.target_object
+            obj = all_objects.get(obj.name)
+        except:
+            pass
+        return obj
+
+
+    def is_target_valid(self):
+        return (self.inflow_velocity_mode == 'INFLOW_VELOCITY_TARGET' and 
+                self.get_target_object() is not None)
+
+
+    def load_post(self):
+        self.initialize()
+
+
+def load_post():
+    inflow_objects = bpy.context.scene.flip_fluid.get_inflow_objects()
+    for inflow in inflow_objects:
+        inflow.flip_fluid.inflow.load_post()
+
+
+def register():
+    bpy.utils.register_class(FlipFluidInflowProperties)
+
+
+def unregister():
+    bpy.utils.unregister_class(FlipFluidInflowProperties)

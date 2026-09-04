@@ -1,0 +1,416 @@
+# Blender FLIP Fluids Add-on
+# Copyright (C) 2026 Ryan L. Guy & Dennis Fassbaender
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import bpy
+
+from ..operators import helper_operators
+from ..utils import version_compatibility_utils as vcu
+
+
+def draw_simulation_display_settings(self, context):
+    domain_object = vcu.get_active_object(context)
+    rprops = domain_object.flip_fluid.domain.render
+    scene_props = context.scene.flip_fluid
+
+    #
+    # Simulation Visibility Panel
+    #
+
+    box = self.layout.box()
+    header, body = box.panel("simulation_display_settings", default_closed=True)
+
+    row = header.row(align=True)
+    row.label(text="Simulation Visibility:")
+    if not scene_props.show_viewport or not scene_props.show_render:
+        visibility_text = ""
+        if not scene_props.show_viewport and not scene_props.show_render:
+            visibility_text += "Disabled in Viewport + Render"
+        elif not scene_props.show_viewport:
+            visibility_text += "Disabled in Viewport"
+        elif not scene_props.show_render:
+            visibility_text += "Disabled in Render"
+            
+        row = row.row(align=True)
+        row.alert = True
+        row.alignment = 'RIGHT'
+        row.label(text=visibility_text, icon="CANCEL")
+
+    if scene_props.show_viewport and scene_props.show_render:
+        row = row.row(align=True)
+        row.alignment = 'RIGHT'
+        row.label(text="Visibility Enabled", icon="CHECKMARK")
+
+    if body:
+        column = body.column()
+        split = vcu.ui_split(column)
+        column_left = split.column()
+        column_left.prop(scene_props, "show_render", text="Show In Render", icon="RESTRICT_RENDER_OFF")
+
+        column_right = split.column()
+        column_right.prop(scene_props, "show_viewport", text="Show In Viewport", icon="RESTRICT_VIEW_OFF")
+
+
+def draw_surface_display_settings(self, context, menu_expand_prop_group=None):
+    domain_object = vcu.get_active_object(context)
+    rprops = domain_object.flip_fluid.domain.render
+    mprops = domain_object.flip_fluid.domain.materials
+
+    #
+    # Surface Display and Render Panel
+    #
+    box = self.layout.box()
+    header, body = box.panel("surface_display_settings", default_closed=False)
+
+    row = header.row(align=True)
+    row.label(text="Surface Display and Render:")
+    if body:
+        column = body.column()
+        split = vcu.ui_split(column, factor=0.5)
+        column_left = split.column()
+        column_left.label(text="Render Display Mode:")
+        column_left.prop(rprops, "render_display", expand=True)
+
+        column_right = split.column()
+        column_right.label(text="Viewport Display Mode:")
+        column_right.prop(rprops, "viewport_display", expand=True)
+
+        column_left.label(text="Surface Material:")
+        column_right.prop(mprops, "surface_material", text="")
+    else:
+        info_text = ""
+        if rprops.render_display == 'DISPLAY_FINAL':
+            info_text += "Render Final"
+        elif rprops.render_display == 'DISPLAY_PREVIEW':
+            info_text += "Render Preview"
+        elif rprops.render_display == 'DISPLAY_NONE':
+            info_text += "Render None"
+        info_text += " / "
+        if rprops.viewport_display == 'DISPLAY_FINAL':
+            info_text += "View Final"
+        elif rprops.viewport_display == 'DISPLAY_PREVIEW':
+            info_text += "View Preview"
+        elif rprops.viewport_display == 'DISPLAY_NONE':
+            info_text += "View None"
+        row = row.row(align=True)
+        row.alignment='RIGHT'
+        row.label(text=info_text)
+
+
+def draw_fluid_particle_display_settings(self, context, menu_expand_prop_group=None):
+    domain_object = vcu.get_active_object(context)
+    dprops = domain_object.flip_fluid.domain
+    rprops = domain_object.flip_fluid.domain.render
+    mprops = domain_object.flip_fluid.domain.materials
+    is_fluid_particles_enabled = domain_object.flip_fluid.domain.particles.enable_fluid_particle_output
+
+    #
+    # Fluid Particle Display and Render Panel
+    #
+    box = self.layout.box()
+    header, body = box.panel("fluid_particle_display_settings", default_closed=True)
+
+    row = header.row(align=True)
+    row.label(text="Fluid Particle Display and Render:")
+    if not is_fluid_particles_enabled:
+        row = row.row()
+        row.alignment = 'RIGHT'
+        c = row.row(align=True)
+        c.alignment = 'RIGHT'
+        c.enabled = False
+        c.label(text="Enable in 'Particles' panel")
+        row.operator("flip_fluid_operators.display_enable_fluid_particles_tooltip", text="", icon="QUESTION", emboss=False)
+
+    if body:
+        subbox = body.box()
+        column = subbox.column(align=True)
+        column.enabled = is_fluid_particles_enabled
+        split = vcu.ui_split(column, factor=0.5)
+        column_left = split.column()
+        column_left.label(text="Render Display Mode:")
+        column_left.prop(rprops, "fluid_particle_render_display", expand=True)
+
+        column_right = split.column()
+        column_right.label(text="Viewport Display Mode:")
+        column_right.prop(rprops, "fluid_particle_viewport_display", expand=True)
+
+        subbox = box.box()
+        column = subbox.column(align=True)
+        column.enabled = is_fluid_particles_enabled
+        split = vcu.ui_split(column, factor=0.5)
+        column_left = split.column(align=True)
+        column_left.label(text="Final Display Amount:")
+        column_left.prop(rprops, "render_fluid_particle_surface_pct", slider=True)
+        column_left.prop(rprops, "render_fluid_particle_boundary_pct", slider=True)
+        column_left.prop(rprops, "render_fluid_particle_interior_pct", slider=True)
+
+        column_right = split.column(align=True)
+        column_right.label(text="Preview Display Amount:")
+        column_right.prop(rprops, "viewport_fluid_particle_surface_pct", slider=True)
+        column_right.prop(rprops, "viewport_fluid_particle_boundary_pct", slider=True)
+        column_right.prop(rprops, "viewport_fluid_particle_interior_pct", slider=True)
+
+        bl_fluid_particles_mesh_cache = dprops.mesh_cache.particles.get_cache_object()
+
+        subbox = box.box()
+        subbox.enabled = is_fluid_particles_enabled
+        column = subbox.column(align=True)
+        column.label(text="Particle Display Settings:")
+        column.separator()
+
+        bl_mod = get_motion_blur_geometry_node_modifier(bl_fluid_particles_mesh_cache)
+        row = column.row(align=True)
+        row.alignment = 'LEFT'
+        row.label(text="Fluid Particles:")
+        if is_fluid_particles_enabled:
+            draw_fluid_particles_motion_blur_geometry_node_properties(row, bl_mod)
+        else:
+            row.label(text="Enable Fluid Particle feature to view full particle settings", icon='INFO')
+
+        subbox = box.box()
+        column = subbox.column(align=True)
+        column.enabled = is_fluid_particles_enabled
+        split = vcu.ui_split(column, factor=0.5)
+        column_left = split.column()
+        column_right = split.column()
+        column_left.label(text="Fluid Particle Material:")
+        column_right.prop(mprops, "fluid_particles_material", text="")
+    else:
+        if is_fluid_particles_enabled:
+            info_text = ""
+            if rprops.fluid_particle_render_display == 'DISPLAY_FINAL':
+                info_text += "Render Final"
+            elif rprops.fluid_particle_render_display == 'DISPLAY_PREVIEW':
+                info_text += "Render Preview"
+            elif rprops.fluid_particle_render_display == 'DISPLAY_NONE':
+                info_text += "Render None"
+            info_text += " / "
+            if rprops.fluid_particle_viewport_display == 'DISPLAY_FINAL':
+                info_text += "View Final"
+            elif rprops.fluid_particle_viewport_display == 'DISPLAY_PREVIEW':
+                info_text += "View Preview"
+            elif rprops.fluid_particle_viewport_display == 'DISPLAY_NONE':
+                info_text += "View None"
+            row = row.row(align=True)
+            row.alignment='RIGHT'
+            row.label(text=info_text)
+
+
+def get_motion_blur_geometry_node_modifier(bl_object):
+    if bl_object is None:
+        return None
+    for mod in bl_object.modifiers:
+        if mod.type == "NODES" and mod.node_group and mod.node_group.name.startswith("FF_GeometryNodes"):
+            return mod
+
+
+def _draw_particle_modifier_properties(ui_row, bl_mod):
+    mod_keys = vcu.get_geometry_nodes_modifier_input_keys(bl_mod)
+
+    prop_list = [
+        ("Input_6", "Scale"),
+        ("Input_4", "Blur Scale"),
+        ("Input_8", "Motion Blur"),
+        ]
+
+    ui_row.alignment = 'LEFT'
+    for prop_info in prop_list:
+        socket_name = prop_info[0]
+        socket_display_text = prop_info[1]
+
+        if socket_name in mod_keys:
+            if vcu.is_blender_52():
+                p = getattr(bl_mod.properties.inputs, socket_name)
+                ui_row.prop(p, "value",  text=socket_display_text)
+            else:
+                ui_row.prop(bl_mod, '["' + socket_name + '"]',  text=socket_display_text)
+
+
+def draw_whitewater_particles_motion_blur_geometry_node_properties(ui_row, bl_mod):
+    if bl_mod is None:
+        ui_row.alert = True
+        ui_row.operator(
+            "flip_fluid_operators.helper_initialize_cache_objects", 
+            text="Click To Initialize Geometry Nodes - Missing FF_GeometryNodesWhitewater modifier",
+            icon="ERROR"
+            ).cache_object_type = 'CACHE_OBJECT_TYPE_WHITEWATER_PARTICLES'
+        return
+
+    _draw_particle_modifier_properties(ui_row, bl_mod)
+
+
+def draw_fluid_particles_motion_blur_geometry_node_properties(ui_row, bl_mod):
+    if bl_mod is None:
+        ui_row.alert = True
+        ui_row.operator(
+            "flip_fluid_operators.helper_initialize_cache_objects", 
+            text="Click To Initialize Geometry Nodes - Missing FF_GeometryNodesFluidParticles modifier",
+            icon="ERROR"
+            ).cache_object_type = 'CACHE_OBJECT_TYPE_FLUID_PARTICLES'
+        return
+
+    _draw_particle_modifier_properties(ui_row, bl_mod)
+
+
+def draw_whitewater_display_settings(self, context, menu_expand_prop_group=None):
+    obj = vcu.get_active_object(context)
+    dprops = obj.flip_fluid.domain
+    rprops = dprops.render
+    is_whitewater_enabled = dprops.whitewater.enable_whitewater_simulation
+
+    #
+    # Whitewater Display and Render Panel
+    #
+    box = self.layout.box()
+    header, body = box.panel("whitewater_display_settings", default_closed=True)
+
+    row = header.row(align=True)
+    row.label(text="Whitewater Display and Render:")
+    if not is_whitewater_enabled:
+        row = row.row()
+        row.alignment = 'RIGHT'
+        c = row.row(align=True)
+        c.alignment = 'RIGHT'
+        c.enabled = False
+        c.label(text="Enable in 'Whitewater' panel")
+        row.operator("flip_fluid_operators.display_enable_whitewater_tooltip", text="", icon="QUESTION", emboss=False)
+
+    if body:
+        box = body.box()
+        box.enabled = is_whitewater_enabled
+
+        column = box.column(align=True)
+        split = column.split()
+        column = split.column(align=True)
+        column.label(text="Render Display Mode:")
+        column.prop(rprops, "whitewater_render_display", expand=True)
+
+        column = split.column(align=True)
+        column.label(text="Viewport Display Mode:")
+        column.prop(rprops, "whitewater_viewport_display", expand=True)
+
+        box = body.box()
+        box.enabled = is_whitewater_enabled
+
+        column = box.column(align=True)
+        split = column.split()
+        column = split.column(align=True)
+        column.label(text="Final Display Amount:")
+        column.prop(rprops, "render_foam_pct", slider=True)
+        column.prop(rprops, "render_bubble_pct", slider=True)
+        column.prop(rprops, "render_spray_pct", slider=True)
+        column.prop(rprops, "render_dust_pct", slider=True)
+
+        column = split.column(align=True)
+        column.label(text="Preview Display Amount:")
+        column.prop(rprops, "viewport_foam_pct", slider=True)
+        column.prop(rprops, "viewport_bubble_pct", slider=True)
+        column.prop(rprops, "viewport_spray_pct", slider=True)
+        column.prop(rprops, "viewport_dust_pct", slider=True)
+
+        box = body.box()
+        box.enabled = is_whitewater_enabled
+
+        column = box.column(align=True)
+        column.label(text="Particle Display Settings:")
+
+        column.separator()
+        split = vcu.ui_split(column, factor=0.1)
+        column1 = split.column(align=True)
+        column2 = split.column(align=True)
+
+        whitewater_labels = ["Foam:", "Bubble:", "Spray:", "Dust:"]
+        mesh_cache_objects = [
+                dprops.mesh_cache.foam.get_cache_object(),
+                dprops.mesh_cache.bubble.get_cache_object(),
+                dprops.mesh_cache.spray.get_cache_object(),
+                dprops.mesh_cache.dust.get_cache_object()
+            ]
+
+        for idx, bl_object in enumerate(mesh_cache_objects):
+            bl_mod = get_motion_blur_geometry_node_modifier(bl_object)
+            row = column1.row(align=True)
+            row.label(text=whitewater_labels[idx])
+            row = column2.row(align=True)
+            if is_whitewater_enabled:
+                draw_whitewater_particles_motion_blur_geometry_node_properties(row, bl_mod)
+            else:
+                row.label(text="Enable Whitewater feature to view full particle settings", icon='INFO')
+
+        box = body.box()
+        box.enabled = is_whitewater_enabled
+
+        mprops = dprops.materials
+        column = box.column(align=True)
+        column.label(text="Particle Materials:")
+        column.prop(mprops, "whitewater_foam_material", text="Foam")
+        column.prop(mprops, "whitewater_bubble_material", text="Bubble")
+        column.prop(mprops, "whitewater_spray_material", text="Spray")
+        column.prop(mprops, "whitewater_dust_material", text="Dust")
+    else:
+        if is_whitewater_enabled:
+            info_text = ""
+            if rprops.whitewater_render_display == 'DISPLAY_FINAL':
+                info_text += "Render Final"
+            elif rprops.whitewater_render_display == 'DISPLAY_PREVIEW':
+                info_text += "Render Preview"
+            elif rprops.whitewater_render_display == 'DISPLAY_NONE':
+                info_text += "Render None"
+            info_text += " / "
+            if rprops.whitewater_viewport_display == 'DISPLAY_FINAL':
+                info_text += "View Final"
+            elif rprops.whitewater_viewport_display == 'DISPLAY_PREVIEW':
+                info_text += "View Preview"
+            elif rprops.whitewater_viewport_display == 'DISPLAY_NONE':
+                info_text += "View None"
+            row = row.row(align=True)
+            row.alignment='RIGHT'
+            row.label(text=info_text)
+
+
+class FLIPFLUID_PT_DomainTypeDisplayPanel(bpy.types.Panel):
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "physics"
+    bl_category = "FLIP Fluid"
+    bl_label = "FLIP Fluid Display and Render Settings"
+    bl_options = {'DEFAULT_CLOSED'}
+
+
+    @classmethod
+    def poll(cls, context):
+        if vcu.get_addon_preferences(context).enable_tabbed_domain_settings_view:
+            return False
+        obj_props = vcu.get_active_object(context).flip_fluid
+        is_addon_disabled = context.scene.flip_fluid.is_addon_disabled_in_blend_file()
+        return obj_props.is_active and obj_props.object_type == "TYPE_DOMAIN" and not is_addon_disabled
+
+
+    def draw(self, context):
+        domain_object = vcu.get_active_object(context)
+        rprops = domain_object.flip_fluid.domain.render
+        
+        draw_simulation_display_settings(self, context)
+        draw_surface_display_settings(self, context, rprops)
+        draw_fluid_particle_display_settings(self, context, rprops)
+        draw_whitewater_display_settings(self, context, rprops)
+    
+
+def register():
+    bpy.utils.register_class(FLIPFLUID_PT_DomainTypeDisplayPanel)
+
+
+def unregister():
+    bpy.utils.unregister_class(FLIPFLUID_PT_DomainTypeDisplayPanel)

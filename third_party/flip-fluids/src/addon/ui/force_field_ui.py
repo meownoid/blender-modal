@@ -1,0 +1,285 @@
+# Blender FLIP Fluids Add-on
+# Copyright (C) 2026 Ryan L. Guy & Dennis Fassbaender
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import bpy, math
+
+from ..utils import version_compatibility_utils as vcu
+
+
+class FLIPFLUID_PT_ForceFieldTypePanel(bpy.types.Panel):
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "physics"
+    bl_category = "FLIP Fluid"
+    bl_label = "FLIP Fluid"
+
+    @classmethod
+    def poll(cls, context):
+        obj_props = vcu.get_active_object(context).flip_fluid
+        is_addon_disabled = context.scene.flip_fluid.is_addon_disabled_in_blend_file()
+        return obj_props.is_active and obj_props.object_type == "TYPE_FORCE_FIELD" and not is_addon_disabled
+
+    def draw(self, context):
+        obj = vcu.get_active_object(context)
+        obj_props = obj.flip_fluid
+        force_field_props = obj_props.force_field
+
+        show_disabled_in_viewport_warning = not vcu.get_addon_preferences().dismiss_flip_object_disabled_in_viewport_hint
+        if show_disabled_in_viewport_warning and obj.hide_viewport:
+            box = self.layout.box()
+            box.alert = True
+            column = box.column(align=True)
+            row = column.row(align=True)
+            row.alignment = 'LEFT'
+            row.prop(force_field_props, "disabled_in_viewport_tooltip", icon="QUESTION", emboss=False, text="")
+            row.label(text="Object is currently disabled in the viewport")
+            row.label(text="", icon="RESTRICT_VIEW_ON")
+            column.label(text="This object will not be included within the simulation")
+
+        def get_disabled_in_viewport_modifiers(bl_obj):
+            mod_list = []
+            if not hasattr(bl_obj, "modifiers"):
+                return mod_list
+            for mod in bl_obj.modifiers:
+                if not mod.show_viewport:
+                    mod_list.append(mod.name)
+            return mod_list
+
+        show_disabled_modifier_in_viewport_warning = not vcu.get_addon_preferences().dismiss_flip_object_modifiers_disabled_in_viewport_hint
+        disabled_modifier_names = get_disabled_in_viewport_modifiers(obj)
+        if show_disabled_modifier_in_viewport_warning and disabled_modifier_names:
+            box = self.layout.box()
+            box.alert = True
+            column = box.column(align=True)
+            row = column.row(align=True)
+            row.alignment = 'LEFT'
+            row.prop(force_field_props, "disabled_in_viewport_modifiers_tooltip", icon="QUESTION", emboss=False, text="")
+            row.label(text="Some object modifiers are currently disabled in the viewport")
+            row.label(text="", icon="RESTRICT_VIEW_ON")
+
+            row = column.row(align=True)
+            row.alignment = 'LEFT'
+            row.label(text="These modifiers will not be included within the simulation:")
+
+            pad = 5
+            for name in disabled_modifier_names:
+                row = column.row(align=True)
+                row.label(text=" " * pad + name)
+
+        column = self.layout.column()
+        column.prop(obj_props, "object_type")
+
+        column = self.layout.column()
+        column.prop(force_field_props, "force_field_type", text="Mode")
+
+        if obj.type == 'CURVE' and force_field_props.force_field_type != 'FORCE_FIELD_TYPE_CURVE':
+            column = self.layout.column()
+            column.label(text="Curve objects can only be set as a Curve Guide Force Field")
+            return
+
+        if obj.type == 'EMPTY' and force_field_props.force_field_type != 'FORCE_FIELD_TYPE_POINT':
+            column = self.layout.column()
+            column.label(text="Empty objects can only be set as a Point Force Field")
+            return
+
+        if obj.type == 'MESH' and force_field_props.force_field_type == 'FORCE_FIELD_TYPE_CURVE':
+            column = self.layout.column()
+            column.label(text="Mesh objects cannot be used as a Curve Guide Force Field")
+            column.label(text="Curve Guide Force Fields only support Curve objects")
+            return
+
+        elif force_field_props.force_field_type == 'FORCE_FIELD_TYPE_VORTEX':
+            column = self.layout.column()
+            column.label(text="Vortex force is not yet available")
+            column.label(text="Feature implementation in progress")
+            return
+        elif force_field_props.force_field_type == 'FORCE_FIELD_TYPE_TURBULENCE':
+            column = self.layout.column()
+            column.label(text="Turbulence guided force is not yet available")
+            column.label(text="Feature implementation in progress")
+            return
+        elif force_field_props.force_field_type == 'FORCE_FIELD_TYPE_PROGRAMMABLE':
+            column = self.layout.column()
+            column.label(text="Programmable guided force is not yet available")
+            column.label(text="Feature implementation in progress")
+            return
+        elif force_field_props.force_field_type == 'FORCE_FIELD_TYPE_OTHER':
+            column = self.layout.column()
+            column.label(text="More force field modes are in development")
+            column.label(text="Try out our experimental builds for the latest features!")
+            column.operator(
+                "wm.url_open", 
+                text="Experimental Builds", 
+                icon="WORLD"
+            ).url = "https://github.com/rlguy/Blender-FLIP-Fluids/wiki/Experimental-Builds"
+            return
+            
+        column = self.layout.column()
+        column.prop(force_field_props, "is_enabled")
+
+        strength_text = "Strength"
+        if force_field_props.force_field_type == 'FORCE_FIELD_TYPE_CURVE':
+            strength_text = "Attraction Strength"
+
+        box = self.layout.box()
+        box.label(text="Field Strength and Falloff:")
+        column = box.column(align=True)
+        column.prop(force_field_props, "strength", text=strength_text)
+
+        if force_field_props.force_field_type == 'FORCE_FIELD_TYPE_CURVE':
+            column.prop(force_field_props, "flow_strength")
+            column.prop(force_field_props, "spin_strength")
+            row = column.row(align=True)
+            row.alignment = 'RIGHT'
+            row.prop(force_field_props, "enable_endcaps")
+
+        column = box.column(align=True)
+        if force_field_props.force_field_type == 'FORCE_FIELD_TYPE_POINT':
+            split = column.split()
+            column_left = split.column(align=True)
+            column_right = split.column(align=True)
+            column_left.prop(force_field_props, "falloff_power")
+            column_right.enabled=False
+
+            # Todo: implement point shapes
+            #column_right.prop(force_field_props, "falloff_shape", text="Shape")
+        else:
+            column.prop(force_field_props, "falloff_power")
+
+        split = column.split()
+        col = split.column()
+        row = col.row(align=True)
+        row.prop(force_field_props, "enable_min_distance", text="")
+        sub = row.row(align=True)
+        sub.active = force_field_props.enable_min_distance
+        sub.prop(force_field_props.min_max_distance, "value_min")
+
+        col = split.column()
+        row = col.row(align=True)
+        row.prop(force_field_props, "enable_max_distance", text="")
+        sub = row.row(align=True)
+        sub.active = force_field_props.enable_max_distance
+        sub.prop(force_field_props.min_max_distance, "value_max")
+
+        eps = 1e-12
+        power = force_field_props.falloff_power
+        distance = eps
+        if force_field_props.enable_min_distance:
+            distance = max(force_field_props.min_max_distance.value_min, eps)
+        denominator = math.pow(distance, force_field_props.falloff_power)
+
+        if denominator == 0.0:
+            max_strength_str = "infinite"
+        else:
+            strength = abs(force_field_props.strength)
+            max_strength = strength * (1.0 / denominator)
+            limit_factor = force_field_props.maximum_force_limit_factor
+            max_strength = min(max_strength, limit_factor * strength)
+            max_strength_str = self._format_strength_value(max_strength)
+            
+        column.separator()
+        column.separator()
+        column.prop(force_field_props, "maximum_force_limit_factor")
+
+        split = column.split()
+        column = split.column()
+        row = column.row()
+        row.alignment = 'LEFT'
+        row.prop(force_field_props, "maximum_strength_tooltip", icon="QUESTION", emboss=False, text="")
+        row.label(text="Max Force:")
+        column = split.column()
+        row = column.row()
+        row.label(text=max_strength_str)
+
+        if force_field_props.force_field_type == 'FORCE_FIELD_TYPE_SURFACE':
+            box = self.layout.box()
+            row = box.row(align=True)
+            row.label(text="Enabled Sides:")
+            row.prop(force_field_props, "enable_frontfacing")
+            row.prop(force_field_props, "enable_backfacing")
+            row.prop(force_field_props, "enable_edgefacing")
+
+        self.layout.separator()
+        box = self.layout.box()
+        box.label(text="Antigravity:")
+        column = box.column(align=True)
+
+        if force_field_props.force_field_type == 'FORCE_FIELD_TYPE_POINT':
+            column.prop(force_field_props, "gravity_scale_point", slider=True)
+            column.prop(force_field_props, "gravity_scale_width_point", text="Width", slider=True)
+        elif force_field_props.force_field_type == 'FORCE_FIELD_TYPE_SURFACE':
+            column.prop(force_field_props, "gravity_scale_surface", slider=True)
+            column.prop(force_field_props, "gravity_scale_width_surface", text="Width", slider=True)
+        elif force_field_props.force_field_type == 'FORCE_FIELD_TYPE_VOLUME':
+            column.prop(force_field_props, "gravity_scale_volume", slider=True)
+            column.prop(force_field_props, "gravity_scale_width_volume", text="Width", slider=True)
+        elif force_field_props.force_field_type == 'FORCE_FIELD_TYPE_CURVE':
+            column.prop(force_field_props, "gravity_scale_curve", slider=True)
+            column.prop(force_field_props, "gravity_scale_width_curve", text="Width", slider=True)
+
+        dprops = context.scene.flip_fluid.get_domain_properties()
+        if dprops is not None:
+            box = self.layout.box()
+            box.label(text="Global Force Field Weights:")
+            column = box.column(align=True)
+            column.prop(dprops.world, "force_field_weight_fluid_particles", slider=True)
+            column.prop(dprops.world, "force_field_weight_whitewater_foam", slider=True)
+            column.prop(dprops.world, "force_field_weight_whitewater_bubble", slider=True)
+            column.prop(dprops.world, "force_field_weight_whitewater_spray", slider=True)
+            column.prop(dprops.world, "force_field_weight_whitewater_dust", slider=True)
+
+        
+        box = self.layout.box()
+        box.label(text="Mesh Data Export:")
+        column = box.column(align=True)
+        
+        row = column.row(align=True)
+        row.alignment = 'LEFT'
+        row.prop(force_field_props, "export_animated_mesh")
+
+        is_child_object = obj.parent is not None
+        is_hint_enabled = not vcu.get_addon_preferences().dismiss_export_animated_mesh_parented_relation_hint
+        if is_hint_enabled and not force_field_props.export_animated_mesh and is_child_object:
+            row.prop(context.scene.flip_fluid_helper, "export_animated_mesh_parent_tooltip", 
+                    icon="QUESTION", emboss=False, text=""
+                    )
+            row.label(text="←Hint: export option may be required")
+        
+        column.prop(force_field_props, "skip_reexport")
+        column.separator()
+        column = box.column(align=True)
+        column.enabled = force_field_props.skip_reexport
+        column.prop(force_field_props, "force_reexport_on_next_bake", toggle=True)
+
+        column = self.layout.column(align=True)
+        column.separator()
+        column.operator("flip_fluid_operators.copy_setting_to_selected", icon='COPYDOWN')
+
+
+    def _format_strength_value(self, s):
+        if s > 10:
+            return '{0:.1f}'.format(s)
+        if s > 1:
+            return '{0:.2f}'.format(s)
+        return '{0:.3f}'.format(s)
+    
+
+def register():
+    bpy.utils.register_class(FLIPFLUID_PT_ForceFieldTypePanel)
+
+
+def unregister():
+    bpy.utils.unregister_class(FLIPFLUID_PT_ForceFieldTypePanel)
