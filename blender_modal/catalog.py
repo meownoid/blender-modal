@@ -6,10 +6,12 @@ import hashlib
 import io
 import json
 import os
-from collections.abc import Iterable
-from contextlib import suppress
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from threading import Event, Thread
+from time import monotonic
 from typing import Any
 
 import modal
@@ -18,6 +20,8 @@ from .models import JobManifest, RenderSpec, SceneFile, SceneManifest, canonical
 
 DEFAULT_VOLUME = "blender-modal-v2"
 ROOTS = ("blobs", "scenes", "results", "jobs", "staging")
+_MISSING_PATH_ERRORS = (FileNotFoundError, modal.exception.NotFoundError)
+ProgressReporter = Callable[[str], None]
 
 
 class CatalogError(RuntimeError):
@@ -64,7 +68,7 @@ class Catalog:
     def read_bytes(self, path: str) -> bytes:
         try:
             return b"".join(self.volume.read_file(path))
-        except FileNotFoundError as exc:
+        except _MISSING_PATH_ERRORS as exc:
             raise CatalogError(f"Missing catalog item: {path}") from exc
 
     def read_json(self, path: str) -> dict[str, Any]:
@@ -79,7 +83,7 @@ class Catalog:
     def exists(self, path: str) -> bool:
         try:
             entries = self.volume.listdir(path)
-        except FileNotFoundError:
+        except _MISSING_PATH_ERRORS:
             return False
         return bool(entries)
 
@@ -167,20 +171,35 @@ class Catalog:
             removed.extend(self._remove(f"results/{result_id}/frames/{frame}", dry_run=dry_run))
         return removed
 
-    def cleanup(self, *, dry_run: bool) -> list[str]:
-        """Remove old staging and content no prepared scene still references."""
+    def cleanup(
+        self,
+        *,
+        dry_run: bool,
+        force: bool = False,
+        progress: ProgressReporter | None = None,
+    ) -> list[str]:
+        """Remove unreferenced content, retaining fresh partial uploads unless forced."""
         cutoff = datetime.now(UTC) - timedelta(hours=24)
-        referenced = {file.sha256 for scene in self.list_scenes() for file in scene.files}
+        _report(progress, "Loading scene manifests")
+        with _progress_heartbeat(progress, "Still loading scene manifests"):
+            referenced = {file.sha256 for scene in self.list_scenes() for file in scene.files}
         remove: list[str] = []
-        for entry in self._files("blobs/sha256"):
-            if PurePosixPath(entry.path).name not in referenced and _older(entry.mtime, cutoff):
-                remove.append(entry.path)
-        for entry in self._files("staging"):
-            if _older(entry.mtime, cutoff):
-                remove.append(entry.path)
+        _report(progress, "Scanning content-addressed blobs")
+        with _progress_heartbeat(progress, "Still scanning content-addressed blobs"):
+            for entry in self._files("blobs/sha256"):
+                if PurePosixPath(entry.path).name not in referenced and (
+                    force or _older(entry.mtime, cutoff)
+                ):
+                    remove.append(entry.path)
+        _report(progress, "Scanning staging files")
+        with _progress_heartbeat(progress, "Still scanning staging files"):
+            for entry in self._files("staging"):
+                if force or _older(entry.mtime, cutoff):
+                    remove.append(entry.path)
         if not dry_run:
+            _report(progress, f"Removing {len(remove)} path(s)")
             for path in remove:
-                with suppress(FileNotFoundError):
+                with suppress(*_MISSING_PATH_ERRORS):
                     self.volume.remove_file(path)
         return remove
 
@@ -189,7 +208,7 @@ class Catalog:
         if not dry_run:
             try:
                 self.volume.remove_file(path, recursive=True)
-            except FileNotFoundError:
+            except _MISSING_PATH_ERRORS:
                 return []
         return entries
 
@@ -200,12 +219,17 @@ class Catalog:
                 for entry in self.volume.iterdir(path, recursive=True)
                 if entry.type.name == "FILE"
             ]
-        except FileNotFoundError:
+        except _MISSING_PATH_ERRORS:
             return []
 
 
 def build_scene(
-    root: Path, blend: Path, includes: Iterable[Path], name: str | None
+    root: Path,
+    blend: Path,
+    includes: Iterable[Path],
+    name: str | None,
+    *,
+    progress: ProgressReporter | None = None,
 ) -> tuple[SceneManifest, dict[str, Path]]:
     root = root.resolve()
     if not root.is_dir():
@@ -214,36 +238,82 @@ def build_scene(
     if blend.suffix.lower() != ".blend" or not blend.is_file():
         raise CatalogError("--blend must name a .blend file inside ROOT")
     selected = list(includes)
-    sources = _project_files(root) if not selected else _included_files(root, selected)
+    _report(progress, "Scanning project files")
+    with _progress_heartbeat(progress, "Still scanning project files"):
+        sources = _project_files(root) if not selected else _included_files(root, selected)
     sources.add(blend)
     mapped: dict[str, Path] = {}
     files: list[SceneFile] = []
-    for source in sorted(sources):
-        relative = source.relative_to(root).as_posix()
-        sha256, size = sha256_file(source)
-        mapped[relative] = source
-        files.append(SceneFile(relative, sha256, size))
+    total = len(sources)
+    with _progress_heartbeat(progress, "Still hashing project files"):
+        for index, source in enumerate(sorted(sources), start=1):
+            relative = source.relative_to(root).as_posix()
+            if _should_report_step(index, total):
+                _report(progress, f"Hashing {index}/{total}: {relative}")
+            sha256, size = sha256_file(source)
+            mapped[relative] = source
+            files.append(SceneFile(relative, sha256, size))
     return SceneManifest.create(blend.relative_to(root).as_posix(), files, name), mapped
 
 
-def upload_scene(catalog: Catalog, manifest: SceneManifest, sources: dict[str, Path]) -> bool:
+def upload_scene(
+    catalog: Catalog,
+    manifest: SceneManifest,
+    sources: dict[str, Path],
+    *,
+    progress: ProgressReporter | None = None,
+) -> bool:
     """Upload content-addressed files and publish a complete immutable scene manifest."""
-    try:
-        existing = catalog.scene(manifest.id)
-    except CatalogError:
-        existing = None
+    _report(progress, f"Checking whether scene {manifest.id} already exists")
+    with _progress_heartbeat(progress, "Still checking for an existing scene"):
+        try:
+            existing = catalog.scene(manifest.id)
+        except CatalogError:
+            existing = None
     if existing is not None:
+        _report(progress, "Scene already exists; skipping upload")
         return False
-    for item in manifest.files:
-        current_hash, current_size = sha256_file(sources[item.path])
-        if (current_hash, current_size) != (item.sha256, item.size):
-            raise CatalogError(f"File changed before upload: {item.path}")
-    with catalog.volume.batch_upload() as upload:
-        uploaded_hashes: set[str] = set()
-        for item in manifest.files:
+
+    total_files = len(manifest.files)
+    _report(progress, f"Verifying {total_files} file(s) are unchanged")
+    with _progress_heartbeat(progress, "Still verifying source files"):
+        for index, item in enumerate(manifest.files, start=1):
+            if _should_report_step(index, total_files):
+                _report(progress, f"Verifying {index}/{total_files}: {item.path}")
+            current_hash, current_size = sha256_file(sources[item.path])
+            if (current_hash, current_size) != (item.sha256, item.size):
+                raise CatalogError(f"File changed before upload: {item.path}")
+
+    _report(progress, f"Checking {total_files} blob(s) already in the Volume")
+    pending: list[SceneFile] = []
+    uploaded_hashes: set[str] = set()
+    with _progress_heartbeat(progress, "Still checking existing blobs"):
+        for index, item in enumerate(manifest.files, start=1):
+            if _should_report_step(index, total_files):
+                _report(progress, f"Checking blob {index}/{total_files}: {item.path}")
             if item.sha256 not in uploaded_hashes and not catalog.exists(blob_path(item.sha256)):
-                upload.put_file(sources[item.path], blob_path(item.sha256))
+                pending.append(item)
             uploaded_hashes.add(item.sha256)
+
+    if pending:
+        upload_size = sum(item.size for item in pending)
+        _report(
+            progress,
+            f"Uploading {len(pending)} new blob(s) ({_format_size(upload_size)})",
+        )
+        with (
+            _progress_heartbeat(progress, "Still uploading blobs"),
+            catalog.volume.batch_upload() as upload,
+        ):
+            for index, item in enumerate(pending, start=1):
+                if _should_report_step(index, len(pending)):
+                    _report(progress, f"Queueing blob {index}/{len(pending)}: {item.path}")
+                upload.put_file(sources[item.path], blob_path(item.sha256))
+            _report(progress, "Committing blob upload")
+        _report(progress, "Blob upload complete")
+    else:
+        _report(progress, "All blobs are already in the Volume")
+
     # Build a ready-to-mount tree using server-side copies. Placeholders make every
     # destination directory exist on both Volume implementations before copying.
     placeholder_paths = sorted(
@@ -252,17 +322,72 @@ def upload_scene(catalog: Catalog, manifest: SceneManifest, sources: dict[str, P
             for item in manifest.files
         }
     )
-    with catalog.volume.batch_upload() as upload:
+    _report(progress, f"Creating {len(placeholder_paths)} scene directory marker(s)")
+    with (
+        _progress_heartbeat(progress, "Still creating scene directory markers"),
+        catalog.volume.batch_upload() as upload,
+    ):
         for directory in placeholder_paths:
             upload.put_file(io.BytesIO(b""), f"{directory}/.blender-modal-dir")
-    for item in manifest.files:
-        destination = f"scenes/{manifest.id}/source/{item.path}"
-        catalog.volume.copy_files([blob_path(item.sha256)], destination)
+    _report(progress, f"Materializing {total_files} scene file(s)")
+    with _progress_heartbeat(progress, "Still materializing scene files"):
+        for index, item in enumerate(manifest.files, start=1):
+            if _should_report_step(index, total_files):
+                _report(progress, f"Materializing {index}/{total_files}: {item.path}")
+            destination = f"scenes/{manifest.id}/source/{item.path}"
+            catalog.volume.copy_files([blob_path(item.sha256)], destination)
     for directory in placeholder_paths:
-        with suppress(FileNotFoundError):
+        with suppress(*_MISSING_PATH_ERRORS):
             catalog.volume.remove_file(f"{directory}/.blender-modal-dir")
-    catalog.write_json(scene_path(manifest.id), manifest.to_dict(), overwrite=False)
+    _report(progress, "Publishing scene manifest")
+    with _progress_heartbeat(progress, "Still publishing scene manifest"):
+        catalog.write_json(scene_path(manifest.id), manifest.to_dict(), overwrite=False)
+    _report(progress, "Scene upload complete")
     return True
+
+
+def _report(progress: ProgressReporter | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
+
+
+def _should_report_step(index: int, total: int) -> bool:
+    return total <= 10 or index == 1 or index == total or index % 25 == 0
+
+
+def _format_size(size: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    raise AssertionError("unreachable")
+
+
+@contextmanager
+def _progress_heartbeat(
+    progress: ProgressReporter | None, status: str, interval_seconds: float = 30
+) -> Iterator[None]:
+    if progress is None:
+        yield
+        return
+
+    started_at = monotonic()
+    completed = Event()
+
+    def report_heartbeat() -> None:
+        while not completed.wait(interval_seconds):
+            elapsed_seconds = int(monotonic() - started_at)
+            _report(progress, f"{status} ({elapsed_seconds}s elapsed)")
+
+    heartbeat = Thread(target=report_heartbeat, daemon=True)
+    heartbeat.start()
+    try:
+        yield
+    finally:
+        completed.set()
+        heartbeat.join()
 
 
 def sha256_file(path: Path) -> tuple[str, int]:

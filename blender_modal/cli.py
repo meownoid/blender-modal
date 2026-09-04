@@ -39,8 +39,13 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     upload = commands.add_parser("upload", help="upload an immutable project tree")
-    upload.add_argument("root", type=Path)
-    upload.add_argument("--blend", required=True, type=Path)
+    upload.add_argument(
+        "root",
+        nargs="?",
+        type=Path,
+        help="project root, or a .blend file when --blend is omitted",
+    )
+    upload.add_argument("--blend", type=Path, help="entrypoint .blend file")
     upload.add_argument("--include", action="append", type=Path, default=[])
     upload.add_argument("--name")
 
@@ -82,6 +87,11 @@ def _parser() -> argparse.ArgumentParser:
 
     cleanup = commands.add_parser("cleanup", help="remove abandoned staging and unreferenced blobs")
     cleanup.add_argument("--dry-run", action="store_true")
+    cleanup.add_argument(
+        "--force",
+        action="store_true",
+        help="also remove fresh unreferenced blobs from interrupted uploads",
+    )
 
     info = commands.add_parser("info", help="show job state and Modal billing")
     info.add_argument("job", nargs="?")
@@ -112,15 +122,41 @@ def _catalog(args: argparse.Namespace) -> Catalog:
 def _upload(args: argparse.Namespace) -> None:
     from .catalog import build_scene, upload_scene
 
-    root = args.root.resolve()
-    blend = args.blend if args.blend.is_absolute() else root / args.blend
-    includes = [path if path.is_absolute() else root / path for path in args.include]
-    manifest, files = build_scene(root, blend, includes, args.name)
-    uploaded = upload_scene(_catalog(args), manifest, files)
+    progress = _command_progress("upload")
+    root, blend = _upload_root_and_blend(args)
+    includes = _upload_includes(args, root, blend)
+    progress(f"Preparing upload from {root}")
+    manifest, files = build_scene(root, blend, includes, args.name, progress=progress)
+    progress(f"Prepared {len(files)} file(s) for scene {manifest.id}")
+    uploaded = upload_scene(_catalog(args), manifest, files, progress=progress)
     _emit(args, {"scene": manifest.to_dict(), "uploaded": uploaded})
 
 
+def _upload_root_and_blend(args: argparse.Namespace) -> tuple[Path, Path]:
+    if args.blend is None:
+        if args.root is None:
+            raise ValueError("upload requires a .blend file or ROOT with --blend")
+        blend = args.root.resolve()
+        return blend.parent, blend
+
+    if args.root is None:
+        blend = args.blend.resolve()
+        return blend.parent, blend
+
+    root = args.root.resolve()
+    blend = args.blend if args.blend.is_absolute() else root / args.blend
+    return root, blend
+
+
+def _upload_includes(args: argparse.Namespace, root: Path, blend: Path) -> list[Path]:
+    includes = [path if path.is_absolute() else root / path for path in args.include]
+    if args.root is None or args.blend is None:
+        includes.append(blend)
+    return includes
+
+
 def _list(args: argparse.Namespace) -> None:
+    _log("list", f"Loading {args.list_command}")
     catalog = _catalog(args)
     values: Any = (
         catalog.list_scenes() if args.list_command == "scenes" else catalog.list_results(args.scene)
@@ -137,14 +173,17 @@ def _list(args: argparse.Namespace) -> None:
             }
             for scene in values
         ]
+    _log("list", f"Found {len(values)} {args.list_command}")
     _emit(args, values)
 
 
 def _render(args: argparse.Namespace) -> None:
+    _log("render", f"Loading scene {args.scene}")
     catalog = _catalog(args)
     catalog.scene(args.scene)
     _validate_render_overrides(args)
     requested = parse_frames(args.frames)
+    _log("render", "Calculating renderer fingerprint")
     spec = RenderSpec(
         scene_id=args.scene,
         backend=args.backend,
@@ -155,10 +194,13 @@ def _render(args: argparse.Namespace) -> None:
         resolution_percentage=args.resolution_percentage,
         renderer_fingerprint=_renderer_fingerprint(),
     )
+    _log("render", "Preparing result set")
     result_id = catalog.create_result_set(spec)
+    _log("render", "Checking completed frames")
     existing = set(catalog.completed_frames(result_id))
     missing = tuple(frame for frame in requested if frame not in existing)
     if not missing:
+        _log("render", f"All {len(requested)} requested frame(s) are already complete")
         _emit(
             args,
             {
@@ -169,6 +211,8 @@ def _render(args: argparse.Namespace) -> None:
             },
         )
         return
+    _log("render", f"{len(existing)} cached frame(s), {len(missing)} frame(s) to render")
+    _log("render", "Checking for an active matching render")
     _ensure_no_active_render(catalog, result_id)
     job = JobManifest(
         id=str(uuid.uuid4()),
@@ -181,10 +225,12 @@ def _render(args: argparse.Namespace) -> None:
         created_at=utc_now(),
         status="running",
     )
+    _log("render", f"Creating render job {job.id}")
     catalog.write_job(job)
     from .worker import app, render_shard
 
     shards = _split(missing, min(args.instances, len(missing)))
+    _log("render", f"Submitting {len(shards)} render shard(s)")
     calls: list[modal.FunctionCall[Any]] = []
     with app.run(
         name=f"blender-modal-{job.id}",
@@ -212,6 +258,7 @@ def _render(args: argparse.Namespace) -> None:
             call_ids=tuple(call.object_id for call in calls),
         )
         catalog.write_job(job)
+        _log("render", f"Submitted {len(calls)} render shard(s)")
         _emit(
             args,
             {
@@ -223,27 +270,35 @@ def _render(args: argparse.Namespace) -> None:
         )
         if not args.detach:
             failures: list[str] = []
-            for call in calls:
+            for index, call in enumerate(calls, start=1):
                 try:
-                    print(f"Waiting for render shard {call.object_id}...", file=sys.stderr)
+                    _log("render", f"Waiting for shard {index}/{len(calls)} ({call.object_id})")
                     call.get()
                 except (
                     Exception
                 ) as exc:  # Modal preserves worker failure details in the job record.
                     failures.append(str(exc))
+            _log("render", "Refreshing final job status")
             _refresh_job(catalog, job.id)
             if failures:
                 raise CatalogError("One or more render shards failed; use info JOB for details")
+            _log("render", "Render completed")
+        else:
+            _log("render", "Render detached; use info to monitor the job")
 
 
 def _download(args: argparse.Namespace) -> None:
+    _log("download", f"Loading results {args.results}")
     catalog = _catalog(args)
     catalog.read_json(result_manifest_path(args.results))
     frames = parse_frames(args.frames) if args.frames else catalog.completed_frames(args.results)
+    _log("download", f"Preparing {len(frames)} frame(s) in {args.output}")
     args.output.mkdir(parents=True, exist_ok=True)
     downloaded: list[int] = []
     skipped: list[int] = []
-    for frame in frames:
+    for index, frame in enumerate(frames, start=1):
+        if _should_log_step(index, len(frames)):
+            _log("download", f"Processing frame {index}/{len(frames)} ({frame})")
         metadata = catalog.read_json(frame_path(args.results, frame, "metadata.json"))
         target = args.output / f"frame_{frame:06d}.png"
         if target.is_file() and _file_hash(target) == metadata.get("sha256"):
@@ -260,6 +315,7 @@ def _download(args: argparse.Namespace) -> None:
             raise CatalogError(f"Downloaded checksum does not match for frame {frame}")
         temporary.replace(target)
         downloaded.append(frame)
+    _log("download", f"Finished: {len(downloaded)} downloaded, {len(skipped)} already present")
     _emit(
         args, {"results": args.results, "downloaded_frames": downloaded, "skipped_frames": skipped}
     )
@@ -268,36 +324,58 @@ def _download(args: argparse.Namespace) -> None:
 def _remove(args: argparse.Namespace) -> None:
     catalog = _catalog(args)
     if args.remove_command == "scene":
+        _log("remove", f"Checking scene {args.scene} is not rendering")
         _ensure_no_active_scene(catalog, args.scene)
+        _log("remove", f"{'Previewing' if args.dry_run else 'Removing'} scene {args.scene}")
         removed = catalog.remove_scene(args.scene, dry_run=args.dry_run)
     else:
+        _log("remove", f"Checking results {args.results} are not rendering")
         _ensure_no_active_render(catalog, args.results)
         frames = parse_frames(args.frames) if args.frames else None
+        _log("remove", f"{'Previewing' if args.dry_run else 'Removing'} results {args.results}")
         removed = catalog.remove_results(args.results, frames, dry_run=args.dry_run)
+    _log("remove", f"Selected {len(removed)} path(s)")
     _emit(args, {"dry_run": args.dry_run, "removed": removed})
 
 
 def _cleanup(args: argparse.Namespace) -> None:
+    progress = _command_progress("cleanup")
     catalog = _catalog(args)
+    progress("Checking for active renders")
     if any(_refresh_job(catalog, job.id).status == "running" for job in catalog.list_jobs()):
         raise CatalogError("cleanup is unavailable while renders are active")
-    _emit(args, {"dry_run": args.dry_run, "removed": catalog.cleanup(dry_run=args.dry_run)})
+    if args.force:
+        progress("Force mode will include fresh unreferenced upload blobs")
+    progress("Scanning removable catalog content")
+    removed = catalog.cleanup(dry_run=args.dry_run, force=args.force, progress=progress)
+    progress(f"Selected {len(removed)} path(s)")
+    _emit(
+        args,
+        {
+            "dry_run": args.dry_run,
+            "removed": removed,
+        },
+    )
 
 
 def _info(args: argparse.Namespace) -> None:
     catalog = _catalog(args)
     if args.job:
+        _log("info", f"Loading job {args.job}")
         job = _refresh_job(catalog, args.job)
+        _log("info", "Loading worker status and billing")
         payload: dict[str, Any] = {
             "job": job.to_dict(),
             "workers": _worker_statuses(catalog, job),
             "billing": _job_billing(catalog, job),
         }
         if args.watch:
+            _log("info", "Watching for job updates")
             _watch(catalog, job.id, args, payload)
             return
         _emit(args, payload)
         return
+    _log("info", "Loading jobs and workspace billing")
     rates, summary, report_error = _billing()
     _emit(
         args,
@@ -314,17 +392,21 @@ def _info(args: argparse.Namespace) -> None:
 
 
 def _cancel(args: argparse.Namespace) -> None:
+    _log("cancel", f"Loading job {args.job}")
     catalog = _catalog(args)
     job = _refresh_job(catalog, args.job)
     if job.status != "running":
         raise CatalogError(f"Job {job.id} is not active")
+    _log("cancel", "Recording cancellation")
     catalog.write_job(replace(job, cancelled=True, status="cancelled", completed_at=utc_now()))
     errors: list[str] = []
-    for call_id in job.call_ids:
+    for index, call_id in enumerate(job.call_ids, start=1):
         try:
+            _log("cancel", f"Cancelling shard {index}/{len(job.call_ids)}")
             modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
         except Exception as exc:
             errors.append(str(exc))
+    _log("cancel", f"Cancellation complete with {len(errors)} error(s)")
     _emit(args, {"job": job.id, "cancelled": True, "errors": errors})
 
 
@@ -477,6 +559,21 @@ def _file_hash(path: Path) -> str:
         while block := source.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _command_progress(command: str) -> Callable[[str], None]:
+    def progress(message: str) -> None:
+        _log(command, message)
+
+    return progress
+
+
+def _log(command: str, message: str) -> None:
+    print(f"{command}: {message}", file=sys.stderr, flush=True)
+
+
+def _should_log_step(index: int, total: int) -> bool:
+    return total <= 10 or index == 1 or index == total or index % 25 == 0
 
 
 def _emit(args: argparse.Namespace, value: Any) -> None:

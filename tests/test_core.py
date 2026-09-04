@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
+import modal
 import pytest
 
-from blender_modal.catalog import CatalogError, build_scene
+from blender_modal.catalog import Catalog, CatalogError, build_scene
+from blender_modal.cli import _log, _parser, _upload_includes, _upload_root_and_blend
 from blender_modal.frames import parse_frames
 
 
@@ -67,6 +71,86 @@ def test_rejects_symlinked_resource(tmp_path: Path) -> None:
 
     with pytest.raises(CatalogError, match="Symlinks"):
         build_scene(root, blend, [], None)
+
+
+def test_upload_accepts_a_blend_file_without_explicit_root(tmp_path: Path) -> None:
+    blend = tmp_path / "project" / "scene.blend"
+    args = _parser().parse_args(["upload", str(blend)])
+
+    root, entrypoint = _upload_root_and_blend(args)
+
+    assert root == blend.parent
+    assert entrypoint == blend
+    assert _upload_includes(args, root, entrypoint) == [blend]
+
+
+def test_upload_keeps_explicit_root_and_relative_blend(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    args = _parser().parse_args(["upload", str(root), "--blend", "scenes/shot.blend"])
+
+    upload_root, entrypoint = _upload_root_and_blend(args)
+
+    assert upload_root == root
+    assert entrypoint == root / "scenes" / "shot.blend"
+    assert _upload_includes(args, upload_root, entrypoint) == []
+
+
+def test_build_scene_reports_hashing_progress(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    blend = root / "scene.blend"
+    blend.write_bytes(b"blend")
+    progress: list[str] = []
+
+    build_scene(root, blend, [], None, progress=progress.append)
+
+    assert progress == ["Scanning project files", "Hashing 1/1: scene.blend"]
+
+
+def test_catalog_missing_remote_path_does_not_exist() -> None:
+    class MissingPathVolume:
+        def listdir(self, path: str) -> list[object]:
+            raise modal.exception.NotFoundError(f'path "/{path}" does not exist')
+
+    catalog = Catalog.__new__(Catalog)
+    catalog.volume = MissingPathVolume()
+
+    assert not catalog.exists("blobs/sha256/missing")
+
+
+def test_forced_cleanup_removes_fresh_unreferenced_uploads() -> None:
+    class CleanupCatalog(Catalog):
+        def __init__(self) -> None:
+            pass
+
+        def list_scenes(self) -> list[object]:
+            return []
+
+        def _files(self, path: str) -> list[object]:
+            return [
+                SimpleNamespace(
+                    path="blobs/sha256/partial-upload",
+                    mtime=int(datetime.now(UTC).timestamp()),
+                )
+            ] if path == "blobs/sha256" else []
+
+    catalog = CleanupCatalog()
+
+    assert catalog.cleanup(dry_run=True) == []
+    assert catalog.cleanup(dry_run=True, force=True) == ["blobs/sha256/partial-upload"]
+
+
+def test_cleanup_accepts_force_flag() -> None:
+    assert _parser().parse_args(["cleanup", "--force"]).force
+
+
+def test_command_log_writes_to_standard_error(capsys: pytest.CaptureFixture[str]) -> None:
+    _log("list", "Loading scenes")
+
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert captured.err == "list: Loading scenes\n"
 
 
 @pytest.mark.parametrize(
