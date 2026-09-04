@@ -27,6 +27,11 @@ error. `--volume` and `--environment` select a non-default Modal workspace.
 entrypoint `.blend` (uploading every regular file below the root). Use `--include`
 to add selected files or directories to a direct `.blend` upload. It hashes every regular file;
 the same scene ID is skipped, while unchanged file blobs are reused by SHA-256.
+Scanning skips files that never affect rendering: OS metadata (`.DS_Store`,
+`Thumbs.db`, `desktop.ini`), editor backups (`*~`, `*.swp`), Blender backup
+saves (`*.blend1`, …), Python caches (`__pycache__`, `*.pyc`), and version
+control internals (`.git`, `.hg`, `.svn`). Explicitly `--include`d files are
+always kept.
 The GPU worker validates external Blender assets when it opens the scene.
 Output is human-readable with colors by default, with a minimal status line
 during long operations. Pass `-v` for detailed progress on standard error

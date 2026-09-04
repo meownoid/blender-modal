@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -22,6 +23,48 @@ DEFAULT_VOLUME = "blender-modal-v2"
 ROOTS = ("blobs", "scenes", "results", "jobs", "staging")
 _MISSING_PATH_ERRORS = (FileNotFoundError, modal.exception.NotFoundError)
 ProgressReporter = Callable[[str], None]
+
+# Directories and files that never belong in a render scene. Explicitly
+# --include'd files bypass this filter; see _project_files / _included_files.
+_IGNORED_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".ipynb_checkpoints",
+        ".Spotlight-V100",
+        ".Trashes",
+        ".fseventsd",
+        ".AppleDouble",
+        ".DocumentRevisions-V100",
+        "$RECYCLE.BIN",
+        "RECYCLER",
+        "System Volume Information",
+    }
+)
+_IGNORED_FILE_NAMES = frozenset(
+    name.lower()
+    for name in (
+        ".DS_Store",
+        "Thumbs.db",
+        "ehthumbs.db",
+        "ehthumbs_vista.db",
+        "Desktop.ini",
+        ".directory",
+        ".LSOverride",
+    )
+)
+_IGNORED_FILE_SUFFIXES = ("~", ".swp", ".swo", ".pyc", ".pyo", ".blend@")
+_BLENDER_BACKUP = re.compile(r".*\.blend\d+$")
+
+
+def _is_ignored_file(name: str) -> bool:
+    return (
+        name.lower() in _IGNORED_FILE_NAMES
+        or name.endswith(_IGNORED_FILE_SUFFIXES)
+        or bool(_BLENDER_BACKUP.match(name))
+    )
 
 
 class CatalogError(RuntimeError):
@@ -408,11 +451,14 @@ def _project_files(root: Path) -> set[Path]:
     files: set[Path] = set()
     for directory, directories, filenames in os.walk(root, followlinks=False):
         current = Path(directory)
+        directories[:] = [name for name in directories if name not in _IGNORED_DIRECTORIES]
         for name in directories:
             path = current / name
             if path.is_symlink():
                 raise CatalogError(f"Symlinks are not supported: {path}")
         for filename in filenames:
+            if _is_ignored_file(filename):
+                continue
             path = current / filename
             if path.is_symlink():
                 raise CatalogError(f"Symlinks are not supported: {path}")

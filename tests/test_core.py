@@ -70,6 +70,48 @@ def test_rejects_paths_outside_project(tmp_path: Path) -> None:
         build_scene(root, blend, [outside], None)
 
 
+def test_upload_ignores_system_and_backup_files(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    blend = root / "scene.blend"
+    texture = root / "textures" / "albedo.png"
+    texture.parent.mkdir()
+    blend.write_bytes(b"blend")
+    texture.write_bytes(b"texture")
+    junk = [
+        root / ".DS_Store",
+        root / "Thumbs.db",
+        root / "scene.blend1",
+        root / "scene.blend@",
+        root / "notes.txt~",
+        root / "editor.swp",
+        root / "textures" / ".DS_Store",
+        root / "__pycache__" / "cache.pyc",
+        root / ".git" / "config",
+    ]
+    for path in junk:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"junk")
+
+    manifest, files = build_scene(root, blend, [], None)
+
+    assert [file.path for file in manifest.files] == ["scene.blend", "textures/albedo.png"]
+    assert set(files.values()) == {blend.resolve(), texture.resolve()}
+
+
+def test_explicit_include_keeps_ignored_name(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    blend = root / "scene.blend"
+    backup = root / "scene.blend1"
+    blend.write_bytes(b"blend")
+    backup.write_bytes(b"backup")
+
+    manifest, _ = build_scene(root, blend, [backup], None)
+
+    assert [file.path for file in manifest.files] == ["scene.blend", "scene.blend1"]
+
+
 def test_rejects_symlinked_resource(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
