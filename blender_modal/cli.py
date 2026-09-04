@@ -57,47 +57,95 @@ def _parser() -> argparse.ArgumentParser:
         help="project root, or a .blend file when --blend is omitted",
     )
     upload.add_argument("--blend", type=Path, help="entrypoint .blend file")
-    upload.add_argument("--include", action="append", type=Path, default=[])
-    upload.add_argument("--name")
+    upload.add_argument(
+        "--include",
+        action="append",
+        type=Path,
+        default=[],
+        help="extra file or directory to include; relative to the project root "
+        "(repeatable)",
+    )
+    upload.add_argument("--name", help="human-readable scene name")
 
     listed = commands.add_parser("list", help="list catalog resources")
     list_commands = listed.add_subparsers(dest="list_command", required=True)
-    list_commands.add_parser("scenes")
-    results = list_commands.add_parser("results")
-    results.add_argument("--scene")
+    list_commands.add_parser("scenes", help="list uploaded scenes")
+    results = list_commands.add_parser("results", help="list render result sets")
+    results.add_argument("--scene", help="only show results for this scene ID")
 
     render = commands.add_parser("render", help="render missing frames on Modal GPUs")
-    render.add_argument("scene")
-    render.add_argument("--frames", required=True)
-    render.add_argument("--gpu", default="T4")
-    render.add_argument("--gpus-per-instance", type=_positive, default=1)
-    render.add_argument("--instances", type=_positive, default=1)
-    render.add_argument("--backend", choices=("OPTIX", "CUDA"), default="OPTIX")
-    render.add_argument("--samples", type=_positive)
-    render.add_argument("--tile-size", type=_positive)
-    render.add_argument("--resolution-x", type=_positive)
-    render.add_argument("--resolution-y", type=_positive)
-    render.add_argument("--resolution-percentage", type=_positive)
-    render.add_argument("--detach", action="store_true")
+    render.add_argument("scene", help="scene ID to render")
+    render.add_argument(
+        "--frames", required=True, help="frame selection, e.g. 1:120 or 1:7:3,2"
+    )
+    render.add_argument("--gpu", default="T4", help="Modal GPU type (default: %(default)s)")
+    render.add_argument(
+        "--gpus-per-instance",
+        type=_positive,
+        default=1,
+        help="GPUs per worker container (default: %(default)s)",
+    )
+    render.add_argument(
+        "--instances",
+        type=_positive,
+        default=1,
+        help="maximum number of parallel workers (default: %(default)s)",
+    )
+    render.add_argument(
+        "--backend",
+        choices=("OPTIX", "CUDA"),
+        default="OPTIX",
+        help="Cycles device backend (default: %(default)s)",
+    )
+    render.add_argument("--samples", type=_positive, help="override scene render samples")
+    render.add_argument("--tile-size", type=_positive, help="override render tile size")
+    render.add_argument(
+        "--resolution-x", type=_positive, help="override output width (requires --resolution-y)"
+    )
+    render.add_argument(
+        "--resolution-y", type=_positive, help="override output height (requires --resolution-x)"
+    )
+    render.add_argument(
+        "--resolution-percentage", type=_positive, help="scale the render resolution (1-100)"
+    )
+    render.add_argument(
+        "--detach", action="store_true", help="submit and return immediately without waiting"
+    )
 
     download = commands.add_parser("download", help="download completed PNGs")
-    download.add_argument("results")
-    download.add_argument("--output", required=True, type=Path)
-    download.add_argument("--frames")
-    download.add_argument("--overwrite", action="store_true")
+    download.add_argument("results", help="results ID to download")
+    download.add_argument(
+        "--output", required=True, type=Path, help="destination directory for PNG frames"
+    )
+    download.add_argument(
+        "--frames", help="frame selection (default: all completed frames)"
+    )
+    download.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing local files instead of failing",
+    )
 
     remove = commands.add_parser("remove", help="delete selected catalog resources")
     remove_commands = remove.add_subparsers(dest="remove_command", required=True)
-    scene = remove_commands.add_parser("scene")
-    scene.add_argument("scene")
-    scene.add_argument("--dry-run", action="store_true")
-    result = remove_commands.add_parser("results")
-    result.add_argument("results")
-    result.add_argument("--frames")
-    result.add_argument("--dry-run", action="store_true")
+    scene = remove_commands.add_parser("scene", help="delete an uploaded scene")
+    scene.add_argument("scene", help="scene ID to delete")
+    scene.add_argument(
+        "--dry-run", action="store_true", help="show what would be removed without deleting"
+    )
+    result = remove_commands.add_parser("results", help="delete rendered frames")
+    result.add_argument("results", help="results ID to delete")
+    result.add_argument(
+        "--frames", help="only remove these frames (default: the whole result set)"
+    )
+    result.add_argument(
+        "--dry-run", action="store_true", help="show what would be removed without deleting"
+    )
 
     cleanup = commands.add_parser("cleanup", help="remove abandoned staging and unreferenced blobs")
-    cleanup.add_argument("--dry-run", action="store_true")
+    cleanup.add_argument(
+        "--dry-run", action="store_true", help="show what would be removed without deleting"
+    )
     cleanup.add_argument(
         "--force",
         action="store_true",
@@ -105,11 +153,13 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     info = commands.add_parser("info", help="show job state and Modal billing")
-    info.add_argument("job", nargs="?")
-    info.add_argument("--watch", action="store_true")
+    info.add_argument("job", nargs="?", help="job ID (omit to list jobs and workspace billing)")
+    info.add_argument(
+        "--watch", action="store_true", help="reprint job state until it finishes"
+    )
 
     cancel = commands.add_parser("cancel", help="cancel a submitted render")
-    cancel.add_argument("job")
+    cancel.add_argument("job", help="job ID to cancel")
     return parser
 
 
