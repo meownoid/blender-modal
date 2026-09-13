@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from rich.console import Console, RenderableType
@@ -64,6 +65,15 @@ def emit_human(renderable: RenderableType) -> None:
 def short_id(identifier: str) -> str:
     """Abbreviate a scene or result ID for human-readable labels only."""
     return identifier[:12]
+
+
+def cost(value: str) -> str:
+    """Format monetary amounts while preserving billing status labels."""
+    try:
+        amount = Decimal(value)
+    except InvalidOperation:
+        return value
+    return f"${amount:.2f}" if amount.is_finite() else value
 
 
 def size_bytes(size: int) -> str:

@@ -863,7 +863,7 @@ def _info_job_human(payload: dict[str, Any]) -> Any:
     billing = payload.get("billing") or {}
     estimate = billing.get("estimate") or {}
     if billing.get("reported_cost") not in (None, "pending"):
-        lines.append(f"Cost: {billing['reported_cost']}")
+        lines.append(f"Cost: {output.cost(str(billing['reported_cost']))}")
         if billing.get("error"):
             lines.append(Text(str(billing["error"]), style="yellow"))
     elif estimate.get("gpu_seconds"):
@@ -908,7 +908,8 @@ def _billing_human(summary: dict[str, Any] | None, report_error: str | None) -> 
         for key, value in sorted(summary.items()):
             if key in ("adjustments", "metered_cost_breakdown"):
                 continue
-            lines.append(Text(f"  {key}: {value}", style="dim"))
+            displayed = str(value) if key in ("start", "end") else output.cost(str(value))
+            lines.append(Text(f"  {key}: {displayed}", style="dim"))
     if report_error:
         lines.append(Text(report_error, style="dim"))
     return Group(*lines)

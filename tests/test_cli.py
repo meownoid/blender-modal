@@ -326,7 +326,7 @@ def test_billing_avoids_catalog(
             }
         }
     else:
-        assert (error or "total: 1.0") in captured
+        assert (error or "total: $1.00") in captured
         assert "No jobs found" not in captured
     constructor.assert_not_called()
 
