@@ -138,6 +138,35 @@ class Catalog:
     def scene(self, scene_id: str) -> SceneManifest:
         return SceneManifest.from_dict(self.read_json(scene_path(scene_id)))
 
+    def resolve_scene_id(self, identifier: str) -> str:
+        return self._resolve_id("scenes", "scene", identifier)
+
+    def resolve_result_id(self, identifier: str) -> str:
+        return self._resolve_id("results", "result", identifier)
+
+    def _resolve_id(self, root: str, kind: str, identifier: str) -> str:
+        if not identifier or "/" in identifier or identifier in {".", ".."}:
+            raise CatalogError(f"Invalid {kind} ID: {identifier!r}; provide a nonempty ID prefix")
+        if self.exists(f"{root}/{identifier}/manifest.json"):
+            return identifier
+        matches = sorted(
+            {
+                PurePosixPath(entry.path).parent.name
+                for entry in self._files(root)
+                if entry.path.count("/") == 2
+                and entry.path.endswith("/manifest.json")
+                and PurePosixPath(entry.path).parent.name.startswith(identifier)
+            }
+        )
+        if not matches:
+            raise CatalogError(f"No {kind} matches ID prefix {identifier!r}")
+        if len(matches) > 1:
+            raise CatalogError(
+                f"Ambiguous {kind} ID prefix {identifier!r}; use a longer prefix or full ID: "
+                + ", ".join(matches)
+            )
+        return matches[0]
+
     def job(self, job_id: str) -> JobManifest:
         return JobManifest.from_dict(self.read_json(job_path(job_id)))
 

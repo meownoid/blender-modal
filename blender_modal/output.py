@@ -61,6 +61,11 @@ def emit_human(renderable: RenderableType) -> None:
     _stdout.file.flush()
 
 
+def short_id(identifier: str) -> str:
+    """Abbreviate a scene or result ID for human-readable labels only."""
+    return identifier[:12]
+
+
 def size_bytes(size: int) -> str:
     units = ("B", "KiB", "MiB", "GiB", "TiB")
     value = float(size)

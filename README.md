@@ -30,6 +30,12 @@ uv run blender-modal scene --json list
 uv run blender-modal scene list --json
 ~~~
 
+Scene and result IDs display their first 12 characters in human-readable output.
+Commands accept the full ID or any nonempty unique prefix, including `result list
+--scene`. If a prefix matches multiple items, the error lists their full IDs;
+use a longer prefix or a full ID. Full IDs remain in JSON output and storage,
+so existing scenes and cached renders keep working. Job IDs are unchanged.
+
 ## Commands
 
 | Command | Purpose |

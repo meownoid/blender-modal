@@ -42,6 +42,8 @@ def isolated_output() -> Iterator[None]:
 @pytest.fixture
 def catalog(monkeypatch: pytest.MonkeyPatch) -> Mock:
     catalog = create_autospec(Catalog, instance=True)
+    catalog.resolve_scene_id.side_effect = lambda identifier: identifier
+    catalog.resolve_result_id.side_effect = lambda identifier: identifier
     monkeypatch.setattr(cli, "Catalog", Mock(return_value=catalog))
     return catalog
 

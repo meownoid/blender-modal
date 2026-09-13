@@ -104,12 +104,14 @@ def _parser() -> argparse.ArgumentParser:
     listed_results = _command_parser(
         result_commands, "list", "list render result sets", _result_list
     )
-    listed_results.add_argument("--scene", help="only show results for this scene ID")
+    listed_results.add_argument(
+        "--scene", help="only show results for this scene ID or unique prefix"
+    )
 
     render = _command_parser(
         scene_commands, "render", "render missing frames on Modal GPUs", _render
     )
-    render.add_argument("scene", help="scene ID to render")
+    render.add_argument("scene", help="scene ID or unique prefix to render")
     render.add_argument(
         "--frames", required=True, help="frame selection, e.g. 1:120 or 1:7:3,2"
     )
@@ -148,7 +150,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     download = _command_parser(result_commands, "download", "download completed PNGs", _download)
-    download.add_argument("results", help="results ID to download")
+    download.add_argument("results", help="results ID or unique prefix to download")
     download.add_argument(
         "--output", required=True, type=Path, help="destination directory for PNG frames"
     )
@@ -162,12 +164,12 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     scene = _command_parser(scene_commands, "remove", "delete an uploaded scene", _scene_remove)
-    scene.add_argument("scene", help="scene ID to delete")
+    scene.add_argument("scene", help="scene ID or unique prefix to delete")
     scene.add_argument(
         "--dry-run", action="store_true", help="show what would be removed without deleting"
     )
     result = _command_parser(result_commands, "remove", "delete rendered frames", _result_remove)
-    result.add_argument("results", help="results ID to delete")
+    result.add_argument("results", help="results ID or unique prefix to delete")
     result.add_argument(
         "--frames", help="only remove these frames (default: the whole result set)"
     )
@@ -263,7 +265,9 @@ def _scene_list(args: argparse.Namespace) -> None:
 
 def _result_list(args: argparse.Namespace) -> None:
     _log("result list", "Loading results")
-    values = _catalog(args).list_results(args.scene)
+    catalog = _catalog(args)
+    scene_id = catalog.resolve_scene_id(args.scene) if args.scene is not None else None
+    values = catalog.list_results(scene_id)
     _log("result list", f"Found {len(values)} results")
     _emit(args, values, _results_human(values))
 
@@ -271,6 +275,7 @@ def _result_list(args: argparse.Namespace) -> None:
 def _render(args: argparse.Namespace) -> None:
     _log("render", f"Loading scene {args.scene}")
     catalog = _catalog(args)
+    args.scene = catalog.resolve_scene_id(args.scene)
     catalog.scene(args.scene)
     _validate_render_overrides(args)
     requested = parse_frames(args.frames)
@@ -302,7 +307,7 @@ def _render(args: argparse.Namespace) -> None:
             },
             Group(
                 f"[green]✓[/] All {len(requested)} requested frame(s) already rendered",
-                Text(f"Results: {result_id}", style="cyan"),
+                Text(f"Results: {output.short_id(result_id)}", style="cyan"),
             ),
         )
         return
@@ -364,7 +369,7 @@ def _render(args: argparse.Namespace) -> None:
             },
             Group(
                 Text(f"Job:     {job.id}", style="cyan"),
-                Text(f"Results: {result_id}", style="cyan"),
+                Text(f"Results: {output.short_id(result_id)}", style="cyan"),
                 f"Frames:  {len(existing)} cached, {len(missing)} submitted",
                 Text(f"Track:   blender-modal job info {job.id}", style="dim"),
             ),
@@ -391,6 +396,7 @@ def _render(args: argparse.Namespace) -> None:
 def _download(args: argparse.Namespace) -> None:
     _log("download", f"Loading results {args.results}")
     catalog = _catalog(args)
+    args.results = catalog.resolve_result_id(args.results)
     catalog.read_json(result_manifest_path(args.results))
     frames = parse_frames(args.frames) if args.frames else catalog.completed_frames(args.results)
     _log("download", f"Preparing {len(frames)} frame(s) in {args.output}")
@@ -429,6 +435,7 @@ def _download(args: argparse.Namespace) -> None:
 
 def _scene_remove(args: argparse.Namespace) -> None:
     catalog = _catalog(args)
+    args.scene = catalog.resolve_scene_id(args.scene)
     _log("scene remove", f"Checking scene {args.scene} is not rendering")
     _ensure_no_active_scene(catalog, args.scene)
     _log("scene remove", f"{'Previewing' if args.dry_run else 'Removing'} scene {args.scene}")
@@ -438,6 +445,7 @@ def _scene_remove(args: argparse.Namespace) -> None:
 
 def _result_remove(args: argparse.Namespace) -> None:
     catalog = _catalog(args)
+    args.results = catalog.resolve_result_id(args.results)
     _log("result remove", f"Checking results {args.results} are not rendering")
     _ensure_no_active_render(catalog, args.results)
     frames = parse_frames(args.frames) if args.frames else None
@@ -737,12 +745,12 @@ def _emit(args: argparse.Namespace, value: Any, human: Any = None) -> None:
 def _upload_human(manifest: SceneManifest, uploaded: bool) -> Any:
     if not uploaded:
         return Text(
-            f"Scene {manifest.id} already exists; upload skipped",
+            f"Scene {output.short_id(manifest.id)} already exists; upload skipped",
             style="yellow",
         )
     size = output.size_bytes(sum(file.size for file in manifest.files))
     return Group(
-        Text(f"✓ Uploaded scene {manifest.id}", style="green"),
+        Text(f"✓ Uploaded scene {output.short_id(manifest.id)}", style="green"),
         Text(
             f"{manifest.name or 'unnamed'} · {len(manifest.files)} file(s) · {size}",
             style="dim",
@@ -760,7 +768,7 @@ def _scenes_human(values: list[dict[str, Any]]) -> Any:
             f"{item['files']} file(s) · {output.size_bytes(int(item['size_bytes']))} · "
             f"{_format_timestamp(str(item['created_at']))}"
         )
-        entries.append(_entry(str(item["id"]), details))
+        entries.append(_entry(output.short_id(str(item["id"])), details))
     return Group(*_spaced(entries))
 
 
@@ -775,7 +783,13 @@ def _results_human(values: list[dict[str, Any]]) -> Any:
             f"{len(item.get('jobs') or [])} job(s) · "
             f"{_format_timestamp(str(item.get('created_at', '')))}"
         )
-        entries.append(_entry(str(item["id"]), details, f"scene {spec.get('scene_id', '-')}"))
+        entries.append(
+            _entry(
+                output.short_id(str(item["id"])),
+                details,
+                f"scene {output.short_id(str(spec.get('scene_id', '-')))}",
+            )
+        )
     return Group(*_spaced(entries))
 
 
@@ -818,7 +832,7 @@ def _info_job_human(payload: dict[str, Any]) -> Any:
             ("  ", ""),
             (f"[{status}]", output.status_style(status)),
         ),
-        Text.assemble(("Results: ", ""), (str(job["result_id"]), "cyan")),
+        Text.assemble(("Results: ", ""), (output.short_id(str(job["result_id"])), "cyan")),
         f"Frames: {len(job['requested_frames'])} requested · "
         f"GPU: {job['gpu']} × {job['gpus_per_instance']} · Instances: {job['instances']}",
         Text.assemble(
