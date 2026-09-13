@@ -128,7 +128,7 @@ def test_rejects_symlinked_resource(tmp_path: Path) -> None:
 
 def test_upload_accepts_a_blend_file_without_explicit_root(tmp_path: Path) -> None:
     blend = tmp_path / "project" / "scene.blend"
-    args = _parser().parse_args(["upload", str(blend)])
+    args = _parser().parse_args(["scene", "upload", str(blend)])
 
     root, entrypoint = _upload_root_and_blend(args)
 
@@ -139,7 +139,7 @@ def test_upload_accepts_a_blend_file_without_explicit_root(tmp_path: Path) -> No
 
 def test_upload_keeps_explicit_root_and_relative_blend(tmp_path: Path) -> None:
     root = tmp_path / "project"
-    args = _parser().parse_args(["upload", str(root), "--blend", "scenes/shot.blend"])
+    args = _parser().parse_args(["scene", "upload", str(root), "--blend", "scenes/shot.blend"])
 
     upload_root, entrypoint = _upload_root_and_blend(args)
 
@@ -218,7 +218,7 @@ def test_quiet_log_is_silent(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_emit_json_prints_machine_readable_output(capsys: pytest.CaptureFixture[str]) -> None:
-    args = _parser().parse_args(["--json", "list", "scenes"])
+    args = _parser().parse_args(["--json", "scene", "list"])
 
     _emit(args, {"results": "abc"}, "human text")
 
@@ -228,7 +228,7 @@ def test_emit_json_prints_machine_readable_output(capsys: pytest.CaptureFixture[
 
 
 def test_emit_human_prints_plain_text(capsys: pytest.CaptureFixture[str]) -> None:
-    args = _parser().parse_args(["list", "scenes"])
+    args = _parser().parse_args(["scene", "list"])
 
     _emit(args, {"results": "abc"}, Text("human text", style="green"))
 
@@ -238,8 +238,8 @@ def test_emit_human_prints_plain_text(capsys: pytest.CaptureFixture[str]) -> Non
 
 
 def test_verbose_flag() -> None:
-    assert _parser().parse_args(["-v", "list", "scenes"]).verbose
-    assert not _parser().parse_args(["list", "scenes"]).verbose
+    assert _parser().parse_args(["-v", "scene", "list"]).verbose
+    assert not _parser().parse_args(["scene", "list"]).verbose
 
 
 @pytest.mark.parametrize(

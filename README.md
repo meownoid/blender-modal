@@ -10,19 +10,54 @@ app that can be detached from the terminal.
 ~~~sh
 uv sync --all-groups
 uv run modal setup
-uv run blender-modal upload ./project/scenes/shot.blend --name shot
-uv run blender-modal upload ./project --blend scenes/shot.blend --name shot
-uv run blender-modal list scenes
-uv run blender-modal render SCENE_ID --frames 1:120 --gpu L4 --instances 4
-uv run blender-modal download RESULTS_ID --output ./renders
+uv run blender-modal scene upload ./project/scenes/shot.blend --name shot
+uv run blender-modal scene upload ./project --blend scenes/shot.blend --name shot
+uv run blender-modal scene list
+uv run blender-modal scene render SCENE_ID --frames 1:120 --gpu L4 --instances 4
+uv run blender-modal result download RESULTS_ID --output ./renders
 ~~~
 
 Use `--detach` to submit a render and return immediately, then inspect it with
-`info JOB_ID` or stop it with `cancel JOB_ID`. `--json` provides structured
+`job info JOB_ID` or stop it with `job cancel JOB_ID`. `--json` provides structured
 machine-readable output; `-v/--verbose` logs detailed progress to standard
 error. `--volume` and `--environment` select a non-default Modal workspace.
+These global options work before the resource, between the resource and action,
+or after the action. Later explicit values take precedence:
 
-`upload` preserves project-relative paths and accepts either a `.blend` file
+~~~sh
+uv run blender-modal --json scene list
+uv run blender-modal scene --json list
+uv run blender-modal scene list --json
+~~~
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `scene upload [ROOT] [options]` | Upload an immutable scene and its assets |
+| `scene list` | List uploaded scenes |
+| `scene render SCENE_ID --frames FRAMES [options]` | Render missing frames |
+| `scene remove SCENE_ID [--dry-run]` | Remove an uploaded scene |
+| `job list` | List stored render jobs |
+| `job info JOB_ID [--watch]` | Inspect job state, workers, and per-job billing |
+| `job cancel JOB_ID` | Cancel an active render job |
+| `result list [--scene SCENE_ID]` | List result sets, optionally filtered by scene |
+| `result download RESULTS_ID --output DIRECTORY [options]` | Download completed PNG frames |
+| `result remove RESULTS_ID [--frames FRAMES] [--dry-run]` | Remove a result set or selected frames |
+| `cleanup [--dry-run] [--force]` | Remove abandoned staging and unreferenced blobs |
+| `billing` | Show workspace billing rates and summary |
+
+Use `--help` at any command level for available options. The previous command
+paths have been replaced: for example, `upload` becomes `scene upload`,
+`list results` becomes `result list`, and `info JOB_ID` becomes `job info JOB_ID`.
+The previous no-ID `info` command is split into `job list` and `billing`.
+With `--json`, these return `{"jobs": [...]}` and `{"billing": {...}}`, respectively.
+Other command payloads retain their existing fields; scene and result listings
+emit one JSON object per line.
+
+## Uploads and rendering
+
+`scene upload` preserves project-relative paths and accepts either a `.blend` file
 (uploading only that file by default), or a project root with an explicit
 entrypoint `.blend` (uploading every regular file below the root). Use `--include`
 to add selected files or directories to a direct `.blend` upload. It hashes every regular file;

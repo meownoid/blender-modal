@@ -7,11 +7,12 @@ import hashlib
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import modal
+from modal.types import BillingReportItem
 from rich.console import Group
 from rich.text import Text
 
@@ -26,7 +27,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     output.configure(verbose=args.verbose)
     try:
-        _commands()[args.command](args)
+        args.handler(args)
     except (CatalogError, ValueError, modal.exception.Error) as exc:
         output.stop_status()
         parser.error(str(exc))
@@ -34,22 +35,54 @@ def main(argv: list[str] | None = None) -> None:
         output.stop_status()
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="blender-modal")
-    parser.add_argument("--volume", default="blender-modal-v2", help="Modal Volume name")
-    parser.add_argument("--environment", help="Modal environment name")
+def _add_global_arguments(parser: argparse.ArgumentParser) -> None:
+    # Nested parsers must preserve options already supplied at an earlier level.
     parser.add_argument(
-        "--json", action="store_true", dest="as_json", help="machine-readable output"
+        "--volume", default=argparse.SUPPRESS, help="Modal Volume name (default: blender-modal-v2)"
+    )
+    parser.add_argument("--environment", default=argparse.SUPPRESS, help="Modal environment name")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        default=argparse.SUPPRESS,
+        help="machine-readable output",
     )
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="log progress details to standard error",
     )
-    commands = parser.add_subparsers(dest="command", required=True)
 
-    upload = commands.add_parser("upload", help="upload an immutable project tree")
+
+def _command_parser(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+    name: str,
+    help: str,
+    handler: Callable[[argparse.Namespace], None] | None = None,
+) -> argparse.ArgumentParser:
+    parser = commands.add_parser(name, help=help, description=help)
+    _add_global_arguments(parser)
+    if handler is not None:
+        parser.set_defaults(handler=handler)
+    return parser
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="blender-modal")
+    _add_global_arguments(parser)
+    parser.set_defaults(volume="blender-modal-v2", environment=None, as_json=False, verbose=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+    scenes = _command_parser(commands, "scene", "manage uploaded scenes")
+    scene_commands = scenes.add_subparsers(dest="action", required=True)
+    jobs = _command_parser(commands, "job", "manage render jobs")
+    job_commands = jobs.add_subparsers(dest="action", required=True)
+    results = _command_parser(commands, "result", "manage render result sets")
+    result_commands = results.add_subparsers(dest="action", required=True)
+
+    upload = _command_parser(scene_commands, "upload", "upload an immutable project tree", _upload)
     upload.add_argument(
         "root",
         nargs="?",
@@ -67,13 +100,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     upload.add_argument("--name", help="human-readable scene name")
 
-    listed = commands.add_parser("list", help="list catalog resources")
-    list_commands = listed.add_subparsers(dest="list_command", required=True)
-    list_commands.add_parser("scenes", help="list uploaded scenes")
-    results = list_commands.add_parser("results", help="list render result sets")
-    results.add_argument("--scene", help="only show results for this scene ID")
+    _command_parser(scene_commands, "list", "list uploaded scenes", _scene_list)
+    listed_results = _command_parser(
+        result_commands, "list", "list render result sets", _result_list
+    )
+    listed_results.add_argument("--scene", help="only show results for this scene ID")
 
-    render = commands.add_parser("render", help="render missing frames on Modal GPUs")
+    render = _command_parser(
+        scene_commands, "render", "render missing frames on Modal GPUs", _render
+    )
     render.add_argument("scene", help="scene ID to render")
     render.add_argument(
         "--frames", required=True, help="frame selection, e.g. 1:120 or 1:7:3,2"
@@ -112,7 +147,7 @@ def _parser() -> argparse.ArgumentParser:
         "--detach", action="store_true", help="submit and return immediately without waiting"
     )
 
-    download = commands.add_parser("download", help="download completed PNGs")
+    download = _command_parser(result_commands, "download", "download completed PNGs", _download)
     download.add_argument("results", help="results ID to download")
     download.add_argument(
         "--output", required=True, type=Path, help="destination directory for PNG frames"
@@ -126,14 +161,12 @@ def _parser() -> argparse.ArgumentParser:
         help="replace existing local files instead of failing",
     )
 
-    remove = commands.add_parser("remove", help="delete selected catalog resources")
-    remove_commands = remove.add_subparsers(dest="remove_command", required=True)
-    scene = remove_commands.add_parser("scene", help="delete an uploaded scene")
+    scene = _command_parser(scene_commands, "remove", "delete an uploaded scene", _scene_remove)
     scene.add_argument("scene", help="scene ID to delete")
     scene.add_argument(
         "--dry-run", action="store_true", help="show what would be removed without deleting"
     )
-    result = remove_commands.add_parser("results", help="delete rendered frames")
+    result = _command_parser(result_commands, "remove", "delete rendered frames", _result_remove)
     result.add_argument("results", help="results ID to delete")
     result.add_argument(
         "--frames", help="only remove these frames (default: the whole result set)"
@@ -142,7 +175,9 @@ def _parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="show what would be removed without deleting"
     )
 
-    cleanup = commands.add_parser("cleanup", help="remove abandoned staging and unreferenced blobs")
+    cleanup = _command_parser(
+        commands, "cleanup", "remove abandoned staging and unreferenced blobs", _cleanup
+    )
     cleanup.add_argument(
         "--dry-run", action="store_true", help="show what would be removed without deleting"
     )
@@ -152,28 +187,17 @@ def _parser() -> argparse.ArgumentParser:
         help="also remove fresh unreferenced blobs from interrupted uploads",
     )
 
-    info = commands.add_parser("info", help="show job state and Modal billing")
-    info.add_argument("job", nargs="?", help="job ID (omit to list jobs and workspace billing)")
+    _command_parser(job_commands, "list", "list render jobs", _job_list)
+    info = _command_parser(job_commands, "info", "show job state and Modal billing", _info)
+    info.add_argument("job", help="job ID to inspect")
     info.add_argument(
         "--watch", action="store_true", help="reprint job state until it finishes"
     )
 
-    cancel = commands.add_parser("cancel", help="cancel a submitted render")
+    cancel = _command_parser(job_commands, "cancel", "cancel a submitted render", _cancel)
     cancel.add_argument("job", help="job ID to cancel")
+    _command_parser(commands, "billing", "show workspace billing", _workspace_billing)
     return parser
-
-
-def _commands() -> dict[str, Callable[[argparse.Namespace], None]]:
-    return {
-        "upload": _upload,
-        "list": _list,
-        "render": _render,
-        "download": _download,
-        "remove": _remove,
-        "cleanup": _cleanup,
-        "info": _info,
-        "cancel": _cancel,
-    }
 
 
 def _catalog(args: argparse.Namespace) -> Catalog:
@@ -200,7 +224,7 @@ def _upload(args: argparse.Namespace) -> None:
 def _upload_root_and_blend(args: argparse.Namespace) -> tuple[Path, Path]:
     if args.blend is None:
         if args.root is None:
-            raise ValueError("upload requires a .blend file or ROOT with --blend")
+            raise ValueError("scene upload requires a .blend file or ROOT with --blend")
         blend = args.root.resolve()
         return blend.parent, blend
 
@@ -220,29 +244,28 @@ def _upload_includes(args: argparse.Namespace, root: Path, blend: Path) -> list[
     return includes
 
 
-def _list(args: argparse.Namespace) -> None:
-    _log("list", f"Loading {args.list_command}")
-    catalog = _catalog(args)
-    values: Any = (
-        catalog.list_scenes() if args.list_command == "scenes" else catalog.list_results(args.scene)
-    )
-    if args.list_command == "scenes":
-        values = [
-            {
-                "id": scene.id,
-                "name": scene.name,
-                "entrypoint": scene.entrypoint,
-                "files": len(scene.files),
-                "size_bytes": sum(file.size for file in scene.files),
-                "created_at": scene.created_at,
-            }
-            for scene in values
-        ]
-        human: Any = _scenes_human(values)
-    else:
-        human = _results_human(values)
-    _log("list", f"Found {len(values)} {args.list_command}")
-    _emit(args, values, human)
+def _scene_list(args: argparse.Namespace) -> None:
+    _log("scene list", "Loading scenes")
+    values = [
+        {
+            "id": scene.id,
+            "name": scene.name,
+            "entrypoint": scene.entrypoint,
+            "files": len(scene.files),
+            "size_bytes": sum(file.size for file in scene.files),
+            "created_at": scene.created_at,
+        }
+        for scene in _catalog(args).list_scenes()
+    ]
+    _log("scene list", f"Found {len(values)} scenes")
+    _emit(args, values, _scenes_human(values))
+
+
+def _result_list(args: argparse.Namespace) -> None:
+    _log("result list", "Loading results")
+    values = _catalog(args).list_results(args.scene)
+    _log("result list", f"Found {len(values)} results")
+    _emit(args, values, _results_human(values))
 
 
 def _render(args: argparse.Namespace) -> None:
@@ -343,7 +366,7 @@ def _render(args: argparse.Namespace) -> None:
                 Text(f"Job:     {job.id}", style="cyan"),
                 Text(f"Results: {result_id}", style="cyan"),
                 f"Frames:  {len(existing)} cached, {len(missing)} submitted",
-                Text(f"Track:   blender-modal info {job.id}", style="dim"),
+                Text(f"Track:   blender-modal job info {job.id}", style="dim"),
             ),
         )
         if not args.detach:
@@ -359,10 +382,10 @@ def _render(args: argparse.Namespace) -> None:
             _log("render", "Refreshing final job status")
             _refresh_job(catalog, job.id)
             if failures:
-                raise CatalogError("One or more render shards failed; use info JOB for details")
+                raise CatalogError("One or more render shards failed; use job info JOB for details")
             _log("render", "Render completed")
         else:
-            _log("render", "Render detached; use info to monitor the job")
+            _log("render", "Render detached; use job info to monitor the job")
 
 
 def _download(args: argparse.Namespace) -> None:
@@ -404,19 +427,26 @@ def _download(args: argparse.Namespace) -> None:
     )
 
 
-def _remove(args: argparse.Namespace) -> None:
+def _scene_remove(args: argparse.Namespace) -> None:
     catalog = _catalog(args)
-    if args.remove_command == "scene":
-        _log("remove", f"Checking scene {args.scene} is not rendering")
-        _ensure_no_active_scene(catalog, args.scene)
-        _log("remove", f"{'Previewing' if args.dry_run else 'Removing'} scene {args.scene}")
-        removed = catalog.remove_scene(args.scene, dry_run=args.dry_run)
-    else:
-        _log("remove", f"Checking results {args.results} are not rendering")
-        _ensure_no_active_render(catalog, args.results)
-        frames = parse_frames(args.frames) if args.frames else None
-        _log("remove", f"{'Previewing' if args.dry_run else 'Removing'} results {args.results}")
-        removed = catalog.remove_results(args.results, frames, dry_run=args.dry_run)
+    _log("scene remove", f"Checking scene {args.scene} is not rendering")
+    _ensure_no_active_scene(catalog, args.scene)
+    _log("scene remove", f"{'Previewing' if args.dry_run else 'Removing'} scene {args.scene}")
+    removed = catalog.remove_scene(args.scene, dry_run=args.dry_run)
+    _emit_removal(args, removed)
+
+
+def _result_remove(args: argparse.Namespace) -> None:
+    catalog = _catalog(args)
+    _log("result remove", f"Checking results {args.results} are not rendering")
+    _ensure_no_active_render(catalog, args.results)
+    frames = parse_frames(args.frames) if args.frames else None
+    _log("result remove", f"{'Previewing' if args.dry_run else 'Removing'} results {args.results}")
+    removed = catalog.remove_results(args.results, frames, dry_run=args.dry_run)
+    _emit_removal(args, removed)
+
+
+def _emit_removal(args: argparse.Namespace, removed: list[str]) -> None:
     _log("remove", f"Selected {len(removed)} path(s)")
     _emit(
         args,
@@ -448,28 +478,33 @@ def _cleanup(args: argparse.Namespace) -> None:
 
 def _info(args: argparse.Namespace) -> None:
     catalog = _catalog(args)
-    if args.job:
-        _log("info", f"Loading job {args.job}")
-        job = _refresh_job(catalog, args.job)
-        _log("info", "Loading worker status and billing")
-        payload: dict[str, Any] = {
-            "job": job.to_dict(),
-            "workers": _worker_statuses(catalog, job),
-            "billing": _job_billing(catalog, job),
-        }
-        if args.watch:
-            _log("info", "Watching for job updates")
-            _watch(catalog, job.id, args, payload, _info_job_human(payload))
-            return
-        _emit(args, payload, _info_job_human(payload))
+    _log("job info", f"Loading job {args.job}")
+    job = _refresh_job(catalog, args.job)
+    _log("job info", "Loading worker status and billing")
+    payload: dict[str, Any] = {
+        "job": job.to_dict(),
+        "workers": _worker_statuses(catalog, job),
+        "billing": _job_billing(catalog, job),
+    }
+    if args.watch:
+        _log("job info", "Watching for job updates")
+        _watch(catalog, job.id, args, payload, _info_job_human(payload))
         return
-    _log("info", "Loading jobs and workspace billing")
+    _emit(args, payload, _info_job_human(payload))
+
+
+def _job_list(args: argparse.Namespace) -> None:
+    _log("job list", "Loading jobs")
+    jobs = _catalog(args).list_jobs()
+    _emit(args, {"jobs": [job.to_dict() for job in jobs]}, _jobs_human(jobs))
+
+
+def _workspace_billing(args: argparse.Namespace) -> None:
+    _log("billing", "Loading workspace billing")
     rates, summary, report_error = _billing()
-    jobs = catalog.list_jobs()
     _emit(
         args,
         {
-            "jobs": [job.to_dict() for job in jobs],
             "billing": {
                 "rates": rates,
                 "summary": summary,
@@ -477,7 +512,7 @@ def _info(args: argparse.Namespace) -> None:
                 "error": report_error,
             },
         },
-        _info_workspace_human(jobs, summary, report_error),
+        _billing_human(summary, report_error),
     )
 
 
@@ -529,9 +564,14 @@ def _worker_statuses(catalog: Catalog, job: JobManifest) -> list[dict[str, Any]]
     statuses: list[dict[str, Any]] = []
     for index in range(min(job.instances, len(job.requested_frames))):
         try:
-            statuses.append(catalog.read_json(f"jobs/{job.id}/workers/{index}.json"))
+            status = catalog.read_json(f"jobs/{job.id}/workers/{index}.json")
         except CatalogError:
             continue
+        # Terminated containers may never publish a final status. Reconcile at read
+        # time so this also covers jobs cancelled before this behavior was added.
+        if job.status == "cancelled" and status.get("status") in {"queued", "running"}:
+            status = {**status, "status": "cancelled"}
+        statuses.append(status)
     return statuses
 
 
@@ -611,9 +651,22 @@ def _job_billing(catalog: Catalog, job: JobManifest) -> dict[str, Any]:
         return {"reported_cost": "pending", "estimate": estimate}
     try:
         workspace = modal.Workspace.from_context()
-        start = datetime.fromisoformat(job.created_at) - timedelta(hours=1)
-        report = workspace.billing.report(start=start, resolution="h", tag_names=["*"])
-        items = [item for item in report if item.object_id == job.app_id]
+        hour = timedelta(hours=1)
+        start = datetime.fromisoformat(job.created_at).astimezone(UTC) - hour
+        start = start.replace(minute=0, second=0, microsecond=0)
+        end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        if job.completed_at:
+            finished = datetime.fromisoformat(job.completed_at).astimezone(UTC)
+            # Modal excludes partial final hours; include the hour of completion.
+            end = min(end, finished.replace(minute=0, second=0, microsecond=0) + hour)
+        items: list[BillingReportItem] = []
+        while start < end:
+            chunk_end = min(start + timedelta(days=7), end)
+            report = workspace.billing.report(
+                start=start, end=chunk_end, resolution="h", tag_names=["*"]
+            )
+            items.extend(item for item in report if item.object_id == job.app_id)
+            start = chunk_end
         if not items:
             return {"reported_cost": "pending", "estimate": estimate}
         resources = {name for item in items for name in item.cost_by_resource}
@@ -763,12 +816,15 @@ def _info_job_human(payload: dict[str, Any]) -> Any:
             ("Job: ", ""),
             (str(job["id"]), "cyan"),
             ("  ", ""),
-            (status, output.status_style(status)),
+            (f"[{status}]", output.status_style(status)),
         ),
-        Text(f"Results: {job['result_id']}", style="cyan"),
+        Text.assemble(("Results: ", ""), (str(job["result_id"]), "cyan")),
         f"Frames: {len(job['requested_frames'])} requested · "
         f"GPU: {job['gpu']} × {job['gpus_per_instance']} · Instances: {job['instances']}",
-        Text(f"Created: {_format_timestamp(str(job['created_at']))}", style="dim"),
+        Text.assemble(
+            ("Created: ", ""),
+            (_format_timestamp(str(job["created_at"])), "cyan"),
+        ),
     ]
     workers = payload.get("workers") or []
     if workers:
@@ -794,6 +850,8 @@ def _info_job_human(payload: dict[str, Any]) -> Any:
     estimate = billing.get("estimate") or {}
     if billing.get("reported_cost") not in (None, "pending"):
         lines.append(f"Cost: {billing['reported_cost']}")
+        if billing.get("error"):
+            lines.append(Text(str(billing["error"]), style="yellow"))
     elif estimate.get("gpu_seconds"):
         gpu_seconds = float(estimate["gpu_seconds"])
         lines.append(
@@ -802,9 +860,7 @@ def _info_job_human(payload: dict[str, Any]) -> Any:
     return Group(*lines)
 
 
-def _info_workspace_human(
-    jobs: list[JobManifest], summary: dict[str, Any] | None, report_error: str | None
-) -> Any:
+def _jobs_human(jobs: list[JobManifest]) -> Any:
     lines: list[Any] = []
     if jobs:
         entries = [
@@ -825,6 +881,11 @@ def _info_workspace_human(
         lines.append(Group(*_spaced(entries)))
     else:
         lines.append(Text("No jobs found", style="dim"))
+    return Group(*lines)
+
+
+def _billing_human(summary: dict[str, Any] | None, report_error: str | None) -> Any:
+    lines: list[Any] = []
     if summary:
         start = str(summary.get("start", ""))[:10]
         end = str(summary.get("end", ""))[:10]
