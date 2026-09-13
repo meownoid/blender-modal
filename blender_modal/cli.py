@@ -22,6 +22,7 @@ from . import output
 from .catalog import Catalog, CatalogError, frame_path, result_manifest_path
 from .frames import parse_frames
 from .models import JobManifest, RenderSpec, SceneManifest, utc_now
+from .resources import image_context
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -670,7 +671,7 @@ def _billing() -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None
 
 
 def _renderer_fingerprint() -> str:
-    root = Path(__file__).resolve().parents[1]
+    root = image_context()
     digest = hashlib.sha256()
     for relative in (
         "Dockerfile",

@@ -6,15 +6,15 @@ on [Modal](https://modal.com).
 ## Installation
 
 You need Python 3.12 or newer, `uv`, and a Modal account. From the root of this
-repository, install the dependencies and connect your Modal account:
+repository, install the CLI and connect your Modal account:
 
 ~~~sh
-uv sync
-uv run modal setup
+uv tool install --reinstall .
+uvx --from 'modal>=1.5.4,<2' modal setup
 ~~~
 
-Run the commands below from the repository root. Rendering uses the bundled
-Dockerfile and renderer files to build the remote GPU image.
+If the command is not on your PATH, run `uv tool update-shell` and
+restart your shell.
 
 ## Quick start
 
@@ -23,14 +23,14 @@ Dockerfile and renderer files to build the remote GPU image.
 For a self-contained `.blend` file:
 
 ~~~sh
-uv run blender-modal scene upload ./shot.blend --name shot
+blender-modal scene upload ./shot.blend --name shot
 ~~~
 
 If your scene uses external textures, linked files, or simulation caches, upload
 the project directory instead. The `--blend` path is relative to that directory:
 
 ~~~sh
-uv run blender-modal scene upload ./project --blend scenes/shot.blend --name shot
+blender-modal scene upload ./project --blend scenes/shot.blend --name shot
 ~~~
 
 Copy the scene ID printed by the upload command. Use it in place of `SCENE_ID`
@@ -39,7 +39,7 @@ below; `shot` is a display name, not an ID.
 ### 2. Render frames
 
 ~~~sh
-uv run blender-modal scene render SCENE_ID --frames 1:120 --gpu L4 --instances 4
+blender-modal scene render SCENE_ID --frames 1:120 --gpu L4 --instances 4
 ~~~
 
 This renders frames 1 through 120, inclusive, using up to four GPU workers.
@@ -50,7 +50,7 @@ The command prints a job ID and a results ID, then waits for rendering to finish
 Replace `RESULTS_ID` with the results ID from the render command:
 
 ~~~sh
-uv run blender-modal result download RESULTS_ID --output ./renders
+blender-modal result download RESULTS_ID --output ./renders
 ~~~
 
 Your PNGs are saved as `frame_000001.png`, `frame_000002.png`, and so on.
@@ -125,7 +125,7 @@ are preserved unless you override them:
 For example, render a smaller preview:
 
 ~~~sh
-uv run blender-modal scene render SCENE_ID --frames 1 --samples 32 --resolution-percentage 50
+blender-modal scene render SCENE_ID --frames 1 --samples 32 --resolution-percentage 50
 ~~~
 
 Completed frames are cached by scene, render settings, and renderer fingerprint.
@@ -139,27 +139,27 @@ does not change the result set.
 Add `--detach` to return after submission while the render continues on Modal:
 
 ~~~sh
-uv run blender-modal scene render SCENE_ID --frames 1:120 --instances 4 --detach
-uv run blender-modal job list
-uv run blender-modal job info JOB_ID
-uv run blender-modal job info JOB_ID --watch
+blender-modal scene render SCENE_ID --frames 1:120 --instances 4 --detach
+blender-modal job list
+blender-modal job info JOB_ID
+blender-modal job info JOB_ID --watch
 ~~~
 
 `job info` shows job state, worker progress, and per-job billing. `--watch`
 refreshes the status until the job finishes. To stop an active render:
 
 ~~~sh
-uv run blender-modal job cancel JOB_ID
+blender-modal job cancel JOB_ID
 ~~~
 
-For workspace billing rates and a summary, use `uv run blender-modal billing`.
+For workspace billing rates and a summary, use `blender-modal billing`.
 
 ### Reading worker logs
 
 ~~~sh
-uv run blender-modal job logs JOB_ID
-uv run blender-modal job logs JOB_ID --tail 1000
-uv run blender-modal job logs JOB_ID --follow
+blender-modal job logs JOB_ID
+blender-modal job logs JOB_ID --tail 1000
+blender-modal job logs JOB_ID --follow
 ~~~
 
 By default, `job logs` shows the latest 100 Modal log entries and exits.
@@ -178,10 +178,10 @@ Modal app ID cannot retrieve logs.
 ### Finding and downloading results
 
 ~~~sh
-uv run blender-modal scene list
-uv run blender-modal result list --scene SCENE_ID
-uv run blender-modal result download RESULTS_ID --output ./renders
-uv run blender-modal result download RESULTS_ID --frames 1:10 --output ./preview
+blender-modal scene list
+blender-modal result list --scene SCENE_ID
+blender-modal result download RESULTS_ID --output ./renders
+blender-modal result download RESULTS_ID --frames 1:10 --output ./preview
 ~~~
 
 Downloads include all completed frames by default. Use `--frames` to select
@@ -194,10 +194,10 @@ Downloaded files are checked against their stored checksums.
 Preview deletions with `--dry-run`, then omit it to apply them:
 
 ~~~sh
-uv run blender-modal scene remove SCENE_ID --dry-run
-uv run blender-modal result remove RESULTS_ID --frames 1:10 --dry-run
-uv run blender-modal result remove RESULTS_ID --dry-run
-uv run blender-modal cleanup --dry-run
+blender-modal scene remove SCENE_ID --dry-run
+blender-modal result remove RESULTS_ID --frames 1:10 --dry-run
+blender-modal result remove RESULTS_ID --dry-run
+blender-modal cleanup --dry-run
 ~~~
 
 `scene remove` removes the uploaded scene record. `result remove` deletes a
@@ -225,9 +225,9 @@ Global options work before the resource, between the resource and action, or
 after the action. Later explicit values take precedence. These are equivalent:
 
 ~~~sh
-uv run blender-modal --json scene list
-uv run blender-modal scene --json list
-uv run blender-modal scene list --json
+blender-modal --json scene list
+blender-modal scene --json list
+blender-modal scene list --json
 ~~~
 
 Use the same `--volume` and `--environment` values when uploading, rendering,
@@ -240,9 +240,9 @@ returns `{"billing": {...}}`.
 
 ## Command reference
 
-All commands below follow `uv run blender-modal`. Add `--help` at any level
+All commands below follow `blender-modal`. Add `--help` at any level
 to see available commands and options, for example
-`uv run blender-modal scene render --help`.
+`blender-modal scene render --help`.
 
 | Command | Purpose |
 | --- | --- |
@@ -277,7 +277,8 @@ scenes and cached renders keep working.
 
 ## Development
 
-Install all dependency groups and run the local checks:
+For an editable development environment, install all dependency groups and run
+the local checks. Use `uv run blender-modal` to run the checkout version:
 
 ~~~sh
 uv sync --all-groups

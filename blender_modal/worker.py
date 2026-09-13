@@ -18,12 +18,13 @@ import modal
 from .catalog import DEFAULT_VOLUME, worker_path
 from .frames import png_dimensions
 from .models import RenderSpec, utc_now
+from .resources import image_context
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = image_context()
 VOLUME_MOUNT = "/data"
 app = modal.App("blender-modal")
 volume = modal.Volume.from_name(DEFAULT_VOLUME, create_if_missing=True, version=2)
-render_image = modal.Image.from_dockerfile(PROJECT_ROOT / "Dockerfile")
+render_image = modal.Image.from_dockerfile(PROJECT_ROOT / "Dockerfile", context_dir=PROJECT_ROOT)
 
 
 @app.function(

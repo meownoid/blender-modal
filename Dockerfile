@@ -48,10 +48,11 @@ COPY renderer/blendrender_enable_flip_fluids.py /tmp/blendrender_enable_flip_flu
 RUN /opt/blender/blender --background --factory-startup --disable-autoexec --python-exit-code 1 --python /tmp/blendrender_enable_flip_fluids.py --python-expr "from flip_fluids_addon.ffengine.ffengine import ffengine; assert ffengine.FluidSimulation_get_version"
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md Dockerfile .dockerignore ./
 COPY blender_modal/ ./blender_modal/
-RUN pip install --no-cache-dir .
 COPY renderer/ ./renderer/
+COPY third_party/flip-fluids/ ./third_party/flip-fluids/
+RUN pip install --no-cache-dir .
 RUN groupadd --gid 10001 blender
 RUN useradd --uid 10001 --gid blender --no-create-home --shell /usr/sbin/nologin blender
 RUN mkdir -p /opt/blender/5.2/scripts/addons_core/flip_fluids_addon/materials/material_library/icons
