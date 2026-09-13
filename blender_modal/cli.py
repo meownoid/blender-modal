@@ -78,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument(
         "--frames", required=True, help="frame selection, e.g. 1:120 or 1:7:3,2"
     )
-    render.add_argument("--gpu", default="T4", help="Modal GPU type (default: %(default)s)")
+    render.add_argument("--gpu", default="L4", help="Modal GPU type (default: %(default)s)")
     render.add_argument(
         "--gpus-per-instance",
         type=_positive,
