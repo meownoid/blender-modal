@@ -286,3 +286,9 @@ uv run pytest -q
 uv run ruff check blender_modal tests renderer
 uv run mypy blender_modal
 ~~~
+
+## License
+
+The original code in this repository is licensed under the [MIT License](LICENSE).
+Third-party code, including FLIP Fluids in `third_party/flip-fluids`, remains under
+its respective licenses.
