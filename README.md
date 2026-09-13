@@ -1,28 +1,228 @@
 # blender-modal
 
 `blender-modal` is a direct command-line client for cached Blender GPU renders
-on Modal. It has no web service or persistent CPU workers. Projects and results
-live in a versioned Modal Volume; each render starts a temporary GPU-only Modal
-app that can be detached from the terminal.
+on [Modal](https://modal.com).
 
-## Install and use
+## Installation
+
+You need Python 3.12 or newer, `uv`, and a Modal account. From the root of this
+repository, install the dependencies and connect your Modal account:
 
 ~~~sh
-uv sync --all-groups
+uv sync
 uv run modal setup
-uv run blender-modal scene upload ./project/scenes/shot.blend --name shot
+~~~
+
+Run the commands below from the repository root. Rendering uses the bundled
+Dockerfile and renderer files to build the remote GPU image.
+
+## Quick start
+
+### 1. Upload your scene
+
+For a self-contained `.blend` file:
+
+~~~sh
+uv run blender-modal scene upload ./shot.blend --name shot
+~~~
+
+If your scene uses external textures, linked files, or simulation caches, upload
+the project directory instead. The `--blend` path is relative to that directory:
+
+~~~sh
 uv run blender-modal scene upload ./project --blend scenes/shot.blend --name shot
-uv run blender-modal scene list
+~~~
+
+Copy the scene ID printed by the upload command. Use it in place of `SCENE_ID`
+below; `shot` is a display name, not an ID.
+
+### 2. Render frames
+
+~~~sh
 uv run blender-modal scene render SCENE_ID --frames 1:120 --gpu L4 --instances 4
+~~~
+
+This renders frames 1 through 120, inclusive, using up to four GPU workers.
+The command prints a job ID and a results ID, then waits for rendering to finish.
+
+### 3. Download the results
+
+Replace `RESULTS_ID` with the results ID from the render command:
+
+~~~sh
 uv run blender-modal result download RESULTS_ID --output ./renders
 ~~~
 
-Use `--detach` to submit a render and return immediately, then inspect it with
-`job info JOB_ID` or stop it with `job cancel JOB_ID`. `--json` provides structured
-machine-readable output; `-v/--verbose` logs detailed progress to standard
-error. `--volume` and `--environment` select a non-default Modal workspace.
-These global options work before the resource, between the resource and action,
-or after the action. Later explicit values take precedence:
+Your PNGs are saved as `frame_000001.png`, `frame_000002.png`, and so on.
+To find IDs again, use `scene list`, `job list`, or `result list`.
+
+## In-depth usage
+
+### Scenes, jobs, and results
+
+A **scene** is an immutable snapshot of your uploaded files. A **job** is one
+render submission. A **result set** stores completed frames for a scene and a
+specific render configuration; multiple jobs can contribute to it.
+
+Scene and result IDs appear as 12-character prefixes in human-readable output.
+Commands accept full IDs or any nonempty unique prefix, including for
+`result list --scene`. If a prefix is ambiguous, the error lists the matching
+full IDs so you can choose a longer prefix. Job IDs must be supplied in full.
+
+### Uploading scenes and assets
+
+Choose the upload form that matches your project:
+
+| Upload form | Files included |
+| --- | --- |
+| `scene upload ./shot.blend` | Only the `.blend` file |
+| `scene upload ./shot.blend --include textures --include cache` | The `.blend` file and the selected files or directories |
+| `scene upload ./project --blend scenes/shot.blend` | Every regular file under the project root, except ignored files |
+
+Uploads preserve project-relative paths. For a direct `.blend` upload,
+`--include` paths are relative to the `.blend` file's directory and must stay
+within it. Use a project-root upload when assets live in sibling directories.
+The GPU worker checks external Blender assets when it opens the scene.
+
+Files are hashed with SHA-256, so unchanged file blobs are reused. Uploading the
+same scene again skips the upload; changing its files creates a new scene ID.
+
+Automatic directory scanning ignores OS metadata (`.DS_Store`, `Thumbs.db`,
+`desktop.ini`), editor backups (`*~`, `*.swp`), Blender backup saves (`*.blend1`,
+…), Python caches (`__pycache__`, `*.pyc`), and version control internals (`.git`,
+`.hg`, `.svn`). Explicitly included files are kept even if they match these rules.
+
+### Selecting frames and render settings
+
+`--frames` accepts single frames, inclusive ranges, stepped ranges, and
+comma-separated combinations:
+
+| Selection | Frames |
+| --- | --- |
+| `10` | Frame 10 |
+| `1:120` | Every frame from 1 through 120 |
+| `1:7:3` | Frames 1, 4, and 7 |
+| `1:7:3,2` | Frames 1, 2, 4, and 7 |
+
+The same syntax works with `result download --frames` and
+`result remove --frames`.
+
+The bundled image uses Blender 5.2.1 with the FLIP Fluids Demo integration.
+Rendering uses Cycles and produces PNGs. Scene samples, tile size, and resolution
+are preserved unless you override them:
+
+| Option | Default or behavior |
+| --- | --- |
+| `--gpu` | `L4` |
+| `--instances` | Maximum parallel workers; defaults to `1` |
+| `--gpus-per-instance` | GPUs per worker; defaults to `1` |
+| `--backend` | `OPTIX` (default) or `CUDA` |
+| `--samples` | Override the scene's render samples |
+| `--tile-size` | Override the render tile size |
+| `--resolution-x`, `--resolution-y` | Override width and height; supply both together |
+| `--resolution-percentage` | Scale the render resolution from `1` to `100` percent |
+
+For example, render a smaller preview:
+
+~~~sh
+uv run blender-modal scene render SCENE_ID --frames 1 --samples 32 --resolution-percentage 50
+~~~
+
+Completed frames are cached by scene, render settings, and renderer fingerprint.
+Repeating a render with the same configuration renders only missing frames;
+if all requested frames are complete, no job is submitted. Changing render
+settings creates a separate result set. Changing the GPU type or worker count
+does not change the result set.
+
+### Running and monitoring jobs
+
+Add `--detach` to return after submission while the render continues on Modal:
+
+~~~sh
+uv run blender-modal scene render SCENE_ID --frames 1:120 --instances 4 --detach
+uv run blender-modal job list
+uv run blender-modal job info JOB_ID
+uv run blender-modal job info JOB_ID --watch
+~~~
+
+`job info` shows job state, worker progress, and per-job billing. `--watch`
+refreshes the status until the job finishes. To stop an active render:
+
+~~~sh
+uv run blender-modal job cancel JOB_ID
+~~~
+
+For workspace billing rates and a summary, use `uv run blender-modal billing`.
+
+### Reading worker logs
+
+~~~sh
+uv run blender-modal job logs JOB_ID
+uv run blender-modal job logs JOB_ID --tail 1000
+uv run blender-modal job logs JOB_ID --follow
+~~~
+
+By default, `job logs` shows the latest 100 Modal log entries and exits.
+`--tail` accepts 1–20,000 entries. `-f/--follow` streams until the Modal app stops
+or you press Ctrl-C; stopping the log stream does not cancel the render.
+`--tail` and `--follow` cannot be combined.
+
+Logs include timestamps, container IDs, and available Modal runtime diagnostics
+across all workers. Blender output is prefixed with its zero-based `[worker N]`
+index. Logs are text only; this command rejects `--json`.
+
+Log availability depends on Modal's retention and what was captured when the
+job ran. Older jobs may lack full Blender output, and jobs without a stored
+Modal app ID cannot retrieve logs.
+
+### Finding and downloading results
+
+~~~sh
+uv run blender-modal scene list
+uv run blender-modal result list --scene SCENE_ID
+uv run blender-modal result download RESULTS_ID --output ./renders
+uv run blender-modal result download RESULTS_ID --frames 1:10 --output ./preview
+~~~
+
+Downloads include all completed frames by default. Use `--frames` to select
+specific completed frames. Local files with matching checksums are skipped;
+if an existing file differs, the command fails unless you pass `--overwrite`.
+Downloaded files are checked against their stored checksums.
+
+### Removing scenes, results, and unused files
+
+Preview deletions with `--dry-run`, then omit it to apply them:
+
+~~~sh
+uv run blender-modal scene remove SCENE_ID --dry-run
+uv run blender-modal result remove RESULTS_ID --frames 1:10 --dry-run
+uv run blender-modal result remove RESULTS_ID --dry-run
+uv run blender-modal cleanup --dry-run
+~~~
+
+`scene remove` removes the uploaded scene record. `result remove` deletes a
+whole result set, or only the frames selected with `--frames`.
+
+`cleanup` removes abandoned staging files and upload blobs no longer referenced
+by any scene. It retains files less than 24 hours old to avoid interfering with
+active uploads. Use `cleanup --force` to remove those fresh files too, such as
+after an interrupted upload.
+
+### Global options and scripting
+
+| Option | Purpose |
+| --- | --- |
+| `--volume NAME` | Select a Modal Volume; defaults to `blender-modal-v2` |
+| `--environment NAME` | Select a Modal environment |
+| `--json` | Write machine-readable output to standard output |
+| `-v`, `--verbose` | Write detailed progress to standard error |
+
+Normal output is human-readable, with colors and a status line during long
+operations. Verbose output adds details such as hashing, file transfers, and
+scene materialization. You can combine `--json` and `--verbose`.
+
+Global options work before the resource, between the resource and action, or
+after the action. Later explicit values take precedence. These are equivalent:
 
 ~~~sh
 uv run blender-modal --json scene list
@@ -30,13 +230,19 @@ uv run blender-modal scene --json list
 uv run blender-modal scene list --json
 ~~~
 
-Scene and result IDs display their first 12 characters in human-readable output.
-Commands accept the full ID or any nonempty unique prefix, including `result list
---scene`. If a prefix matches multiple items, the error lists their full IDs;
-use a longer prefix or a full ID. Full IDs remain in JSON output and storage,
-so existing scenes and cached renders keep working. Job IDs are unchanged.
+Use the same `--volume` and `--environment` values when uploading, rendering,
+and inspecting or downloading the associated data. For `job logs`, these
+options select the job catalog and Modal environment used to retrieve logs.
 
-## Commands
+JSON output keeps full scene and result IDs. Scene and result listings emit
+one JSON object per line; `job list` returns `{"jobs": [...]}`, and `billing`
+returns `{"billing": {...}}`.
+
+## Command reference
+
+All commands below follow `uv run blender-modal`. Add `--help` at any level
+to see available commands and options, for example
+`uv run blender-modal scene render --help`.
 
 | Command | Purpose |
 | --- | --- |
@@ -54,64 +260,27 @@ so existing scenes and cached renders keep working. Job IDs are unchanged.
 | `cleanup [--dry-run] [--force]` | Remove abandoned staging and unreferenced blobs |
 | `billing` | Show workspace billing rates and summary |
 
-Use `--help` at any command level for available options. The previous command
-paths have been replaced: for example, `upload` becomes `scene upload`,
-`list results` becomes `result list`, and `info JOB_ID` becomes `job info JOB_ID`.
-The previous no-ID `info` command is split into `job list` and `billing`.
-With `--json`, these return `{"jobs": [...]}` and `{"billing": {...}}`, respectively.
-Other command payloads retain their existing fields; scene and result listings
-emit one JSON object per line.
+## Upgrading from older command names
 
-### Worker logs
+The previous command paths have been replaced:
 
-~~~sh
-uv run blender-modal job logs JOB_ID
-uv run blender-modal job logs JOB_ID --tail 1000
-uv run blender-modal job logs JOB_ID --follow
-~~~
+| Previous command | Current command |
+| --- | --- |
+| `upload` | `scene upload` |
+| `list results` | `result list` |
+| `info JOB_ID` | `job info JOB_ID` |
+| `info` (without an ID) | `job list` and `billing` |
 
-`job logs` displays the latest 100 Modal log entries and exits. `--tail` accepts
-1–20,000 entries; `-f/--follow` streams until the Modal app stops or you press
-Ctrl-C, without cancelling the render. `--tail` and `--follow` cannot be combined.
-Logs include timestamps, container IDs, and available Modal runtime diagnostics
-across all workers. Blender output is prefixed with its zero-based `[worker N]`
-index. This command provides text output only and rejects `--json`.
+Apart from the `job list` and `billing` JSON shapes described above, command
+payloads retain their existing fields. Full IDs remain in storage, so existing
+scenes and cached renders keep working.
 
-`--volume` selects the job catalog and `--environment` selects the Modal
-environment, as with other commands. Logs are retrieved from Modal and are
-subject to its retention. Existing jobs can only show previously captured
-output; full Blender output is available for jobs submitted with the updated
-worker. Jobs without a stored Modal app ID cannot retrieve logs.
+## Development
 
-## Uploads and rendering
-
-`scene upload` preserves project-relative paths and accepts either a `.blend` file
-(uploading only that file by default), or a project root with an explicit
-entrypoint `.blend` (uploading every regular file below the root). Use `--include`
-to add selected files or directories to a direct `.blend` upload. It hashes every regular file;
-the same scene ID is skipped, while unchanged file blobs are reused by SHA-256.
-Scanning skips files that never affect rendering: OS metadata (`.DS_Store`,
-`Thumbs.db`, `desktop.ini`), editor backups (`*~`, `*.swp`), Blender backup
-saves (`*.blend1`, …), Python caches (`__pycache__`, `*.pyc`), and version
-control internals (`.git`, `.hg`, `.svn`). Explicitly `--include`d files are
-always kept.
-The GPU worker validates external Blender assets when it opens the scene.
-Output is human-readable with colors by default, with a minimal status line
-during long operations. Pass `-v` for detailed progress on standard error
-(hashing, blob transfer, scene materialization), or `--json` for
-machine-readable output on standard output; both can be combined.
-
-`cleanup` retains unreferenced upload blobs for 24 hours to avoid interfering with
-an active upload. Use `cleanup --force` to immediately remove unreferenced blobs
-from an interrupted upload.
-
-The bundled GPU image retains the pinned Blender 5.2.1 and FLIP Fluids Demo
-integration. Cycles renders PNG results with OptiX or CUDA; scene settings are
-preserved unless samples, tile size, or resolution overrides are supplied.
-
-For local checks:
+Install all dependency groups and run the local checks:
 
 ~~~sh
+uv sync --all-groups
 uv run pytest -q
 uv run ruff check blender_modal tests renderer
 uv run mypy blender_modal
