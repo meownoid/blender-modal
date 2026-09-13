@@ -46,6 +46,7 @@ so existing scenes and cached renders keep working. Job IDs are unchanged.
 | `scene remove SCENE_ID [--dry-run]` | Remove an uploaded scene |
 | `job list` | List stored render jobs |
 | `job info JOB_ID [--watch]` | Inspect job state, workers, and per-job billing |
+| `job logs JOB_ID [--tail N \| --follow]` | Show recent worker logs or stream live output |
 | `job cancel JOB_ID` | Cancel an active render job |
 | `result list [--scene SCENE_ID]` | List result sets, optionally filtered by scene |
 | `result download RESULTS_ID --output DIRECTORY [options]` | Download completed PNG frames |
@@ -60,6 +61,27 @@ The previous no-ID `info` command is split into `job list` and `billing`.
 With `--json`, these return `{"jobs": [...]}` and `{"billing": {...}}`, respectively.
 Other command payloads retain their existing fields; scene and result listings
 emit one JSON object per line.
+
+### Worker logs
+
+~~~sh
+uv run blender-modal job logs JOB_ID
+uv run blender-modal job logs JOB_ID --tail 1000
+uv run blender-modal job logs JOB_ID --follow
+~~~
+
+`job logs` displays the latest 100 Modal log entries and exits. `--tail` accepts
+1–20,000 entries; `-f/--follow` streams until the Modal app stops or you press
+Ctrl-C, without cancelling the render. `--tail` and `--follow` cannot be combined.
+Logs include timestamps, container IDs, and available Modal runtime diagnostics
+across all workers. Blender output is prefixed with its zero-based `[worker N]`
+index. This command provides text output only and rejects `--json`.
+
+`--volume` selects the job catalog and `--environment` selects the Modal
+environment, as with other commands. Logs are retrieved from Modal and are
+subject to its retention. Existing jobs can only show previously captured
+output; full Blender output is available for jobs submitted with the updated
+worker. Jobs without a stored Modal app ID cannot retrieve logs.
 
 ## Uploads and rendering
 

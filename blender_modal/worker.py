@@ -87,6 +87,7 @@ def render_shard(
             )
             assert process.stdout is not None
             for line in process.stdout:
+                print(f"[worker {worker_index}] {line}", end="", flush=True)
                 event = _render_event(line)
                 if event and event.get("type") == "frame_completed":
                     frame = int(event["frame"])

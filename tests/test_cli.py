@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock, create_autospec
+from unittest.mock import call as mock_call
 
 import pytest
 from modal.types import BillingReportItem
@@ -23,6 +26,7 @@ COMMANDS = [
     (["scene", "render", "scene-id", "--frames", "1:3"], "_render"),
     (["job", "list"], "_job_list"),
     (["job", "info", "job-id"], "_info"),
+    (["job", "logs", "job-id"], "_job_logs"),
     (["job", "cancel", "job-id"], "_cancel"),
     (["result", "list"], "_result_list"),
     (["result", "download", "result-id", "--output", "renders"], "_download"),
@@ -136,6 +140,12 @@ def test_later_global_values_win() -> None:
         ["result"],
         ["job", "info"],
         ["job", "cancel"],
+        ["job", "logs"],
+        ["job", "logs", "id", "--tail", "0"],
+        ["job", "logs", "id", "--tail", "-1"],
+        ["job", "logs", "id", "--tail", "20001"],
+        ["job", "logs", "id", "--tail", "abc"],
+        ["job", "logs", "id", "--tail", "100", "--follow"],
         ["scene", "remove"],
         ["result", "remove"],
         ["result", "download", "id"],
@@ -329,6 +339,109 @@ def test_billing_avoids_catalog(
         assert (error or "total: $1.00") in captured
         assert "No jobs found" not in captured
     constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("flags", "modal_flags"),
+    [
+        ([], ["--tail", "100"]),
+        (["--tail", "1"], ["--tail", "1"]),
+        (["--tail", "20000"], ["--tail", "20000"]),
+        (["--follow"], ["--follow"]),
+        (["-f"], ["--follow"]),
+    ],
+)
+@pytest.mark.parametrize("environment", [None, "dev"])
+def test_job_logs_invokes_modal_without_changing_job(
+    flags: list[str],
+    modal_flags: list[str],
+    environment: str | None,
+    catalog: Mock,
+    job: JobManifest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog.job.return_value = replace(job, app_id="ap-test", status="running")
+    run = Mock(return_value=subprocess.CompletedProcess([], 0))
+    refresh = Mock(side_effect=AssertionError("logs must not refresh job state"))
+    function_call = Mock(side_effect=AssertionError("logs must not access or cancel calls"))
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    monkeypatch.setattr(cli, "_refresh_job", refresh)
+    monkeypatch.setattr(cli.modal.FunctionCall, "from_id", function_call)
+    env_flags = ["--environment", environment] if environment is not None else []
+
+    cli.main(["job", "logs", job.id, *flags, *env_flags])
+
+    command = [
+        sys.executable, "-m", "modal", "app", "logs", "ap-test",
+        "--timestamps", "--show-container-id",
+    ]
+    if environment is not None:
+        command.extend(["--env", environment])
+    run.assert_called_once_with([*command, *modal_flags], check=False)
+    assert catalog.method_calls == [mock_call.job(job.id)]
+    refresh.assert_not_called()
+    function_call.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["missing-job", "missing-app", "json"])
+def test_job_logs_reports_unavailable_logs(
+    failure: str,
+    catalog: Mock,
+    job: JobManifest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    catalog.job.return_value = job
+    if failure == "missing-job":
+        catalog.job.side_effect = CatalogError("Job does not exist")
+    run = Mock()
+    monkeypatch.setattr(cli.subprocess, "run", run)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["job", "logs", job.id, *(["--json"] if failure == "json" else [])])
+
+    assert exc.value.code == 2
+    expected = {
+        "missing-job": "Job does not exist",
+        "missing-app": "has no Modal app ID",
+        "json": "does not support --json",
+    }
+    captured = capsys.readouterr()
+    assert expected[failure] in captured.err
+    assert captured.out == ""
+    run.assert_not_called()
+    catalog.write_job.assert_not_called()
+    if failure == "json":
+        catalog.job.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "exit_code"),
+    [(7, 7), (-15, 143), (KeyboardInterrupt(), 130), (OSError("cannot launch"), 2)],
+)
+def test_job_logs_preserves_failures_and_interrupts(
+    outcome: int | BaseException,
+    exit_code: int,
+    catalog: Mock,
+    job: JobManifest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog.job.return_value = replace(job, app_id="ap-test", status="running")
+    run = Mock()
+    if isinstance(outcome, int):
+        run.return_value = subprocess.CompletedProcess([], outcome)
+    else:
+        run.side_effect = outcome
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    function_call = Mock(side_effect=AssertionError("logs must not cancel workers"))
+    monkeypatch.setattr(cli.modal.FunctionCall, "from_id", function_call)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["job", "logs", job.id, "--follow"])
+
+    assert exc.value.code == exit_code
+    assert catalog.method_calls == [mock_call.job(job.id)]
+    function_call.assert_not_called()
 
 
 @pytest.mark.parametrize("watch", [False, True])

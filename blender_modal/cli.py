@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import subprocess
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, replace
@@ -190,6 +192,16 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     _command_parser(job_commands, "list", "list render jobs", _job_list)
+    logs = _command_parser(job_commands, "logs", "show render worker logs", _job_logs)
+    logs.description = "Show render worker logs as text (--json is unsupported)."
+    logs.add_argument("job", help="job ID whose logs to display")
+    log_mode = logs.add_mutually_exclusive_group()
+    log_mode.add_argument(
+        "--tail", type=_log_tail, help="number of recent entries (1-20000; default: 100)"
+    )
+    log_mode.add_argument(
+        "-f", "--follow", action="store_true", help="stream logs until the Modal app stops"
+    )
     info = _command_parser(job_commands, "info", "show job state and Modal billing", _info)
     info.add_argument("job", help="job ID to inspect")
     info.add_argument(
@@ -501,6 +513,38 @@ def _info(args: argparse.Namespace) -> None:
     _emit(args, payload, _info_job_human(payload))
 
 
+def _job_logs(args: argparse.Namespace) -> None:
+    if args.as_json:
+        raise CatalogError("job logs provides text output and does not support --json")
+    _log("job logs", f"Loading job {args.job}")
+    job = _catalog(args).job(args.job)
+    if not job.app_id:
+        raise CatalogError(f"Job {job.id} has no Modal app ID; logs are unavailable")
+    command = [
+        sys.executable, "-m", "modal", "app", "logs", job.app_id,
+        "--timestamps", "--show-container-id",
+    ]
+    if args.environment is not None:
+        command.extend(["--env", args.environment])
+    if args.follow:
+        command.append("--follow")
+    else:
+        command.extend(["--tail", str(args.tail if args.tail is not None else 100)])
+    _log("job logs", f"{'Following' if args.follow else 'Fetching'} logs for {job.app_id}")
+    output.stop_status()
+    try:
+        result = subprocess.run(command, check=False)
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    except OSError as exc:
+        raise CatalogError(f"Could not start Modal log viewer: {exc}") from exc
+    if result.returncode:
+        # Subprocesses use negative return codes for signals; shells use 128 + signal.
+        raise SystemExit(
+            result.returncode if result.returncode > 0 else 128 - result.returncode
+        )
+
+
 def _job_list(args: argparse.Namespace) -> None:
     _log("job list", "Loading jobs")
     jobs = _catalog(args).list_jobs()
@@ -703,6 +747,13 @@ def _validate_render_overrides(args: argparse.Namespace) -> None:
         raise CatalogError("--resolution-x and --resolution-y must be supplied together")
     if args.resolution_percentage is not None and args.resolution_percentage > 100:
         raise CatalogError("--resolution-percentage must be at most 100")
+
+
+def _log_tail(value: str) -> int:
+    parsed = _positive(value)
+    if parsed > 20_000:
+        raise argparse.ArgumentTypeError("must not exceed 20000")
+    return parsed
 
 
 def _positive(value: str) -> int:
